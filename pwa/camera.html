@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Re:Action — 카메라</title>
+  <script src="config.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #000;
+      color: white;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    #videoPreview {
+      width: 100%;
+      flex: 1;
+      object-fit: cover;
+      background: #111;
+    }
+    .controls {
+      padding: 24px 20px 40px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+      background: #000;
+    }
+    .status {
+      font-size: 13px;
+      color: #aaa;
+      text-align: center;
+    }
+    .record-btn {
+      width: 70px; height: 70px;
+      border-radius: 50%;
+      border: 4px solid white;
+      background: #ef4444;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .record-btn.recording {
+      background: #ef4444;
+      animation: recPulse 1s infinite;
+    }
+    .record-btn.stopped { background: #555; }
+    @keyframes recPulse { 0%,100%{transform:scale(1)} 50%{transform:scale(1.05)} }
+    .record-inner {
+      width: 28px; height: 28px;
+      background: white;
+      border-radius: 50%;
+      transition: border-radius 0.2s;
+    }
+    .recording .record-inner { border-radius: 4px; }
+    .upload-btn {
+      display: none;
+      width: 100%;
+      max-width: 320px;
+      padding: 14px;
+      background: #3b82f6;
+      border: none;
+      border-radius: 12px;
+      color: white;
+      font-size: 16px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .upload-btn:disabled { background: #555; }
+    .msg {
+      font-size: 14px;
+      color: #aaa;
+      text-align: center;
+      padding: 0 20px;
+    }
+  </style>
+</head>
+<body>
+  <video id="videoPreview" autoplay muted playsinline></video>
+  <div class="controls">
+    <div class="status" id="statusText">카메라 준비 중...</div>
+    <div class="record-btn" id="recordBtn" onclick="toggleRecord()">
+      <div class="record-inner"></div>
+    </div>
+    <button class="upload-btn" id="uploadBtn" onclick="uploadVideo()">영상 업로드</button>
+    <div class="msg" id="msg"></div>
+  </div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const SESSION_ID = params.get("session");
+  const CODE = params.get("code");
+
+  let mediaRecorder = null;
+  let chunks = [];
+  let stream = null;
+  let recording = false;
+  let videoBlob = null;
+
+  async function init() {
+    if (!SESSION_ID) {
+      setMsg("올바르지 않은 QR 코드예요");
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: true });
+      document.getElementById("videoPreview").srcObject = stream;
+      setStatus("촬영 버튼을 눌러 시작하세요");
+      // 연결됨 알림
+      await fetch(`${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/connect`, { method: "POST" });
+    } catch (e) {
+      setStatus("카메라 접근 실패 — 권한을 허용해주세요");
+    }
+  }
+
+  function toggleRecord() {
+    if (!recording) startRecord();
+    else stopRecord();
+  }
+
+  function startRecord() {
+    if (!stream) return;
+    chunks = [];
+    mediaRecorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      videoBlob = new Blob(chunks, { type: "video/webm" });
+      document.getElementById("uploadBtn").style.display = "block";
+      setStatus("촬영 완료! 업로드 버튼을 눌러주세요");
+    };
+    mediaRecorder.start();
+    recording = true;
+    document.getElementById("recordBtn").className = "record-btn recording";
+    setStatus("🔴 녹화 중...");
+  }
+
+  function stopRecord() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+    recording = false;
+    document.getElementById("recordBtn").className = "record-btn stopped";
+  }
+
+  async function uploadVideo() {
+    if (!videoBlob) return;
+    const btn = document.getElementById("uploadBtn");
+    btn.disabled = true;
+    btn.textContent = "업로드 중...";
+    setMsg("");
+
+    try {
+      // 임시 session_id=1 (실제 연동 시 교체)
+      const formData = new FormData();
+      formData.append("file", videoBlob, `recording_${SESSION_ID}.webm`);
+      const res = await fetch(`${CONFIG.API_BASE_URL}/api/v1/sessions/1/video/upload`, {
+        method: "POST",
+        body: formData,
+      });
+      if (!res.ok) throw new Error("업로드 실패");
+      const data = await res.json();
+
+      // 완료 알림
+      await fetch(
+        `${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/done?video_url=${encodeURIComponent(data.s3_url || "")}`,
+        { method: "POST" }
+      );
+      btn.textContent = "업로드 완료 ✅";
+      setStatus("모든 작업이 완료됐어요!");
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = "다시 업로드";
+      setMsg("업로드 실패 — 다시 시도해주세요");
+    }
+  }
+
+  function setStatus(t) { document.getElementById("statusText").textContent = t; }
+  function setMsg(t) { document.getElementById("msg").textContent = t; }
+
+  init();
+</script>
+</body>
+</html>
