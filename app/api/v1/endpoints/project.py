@@ -1,9 +1,3 @@
-"""
-project.py
-──────────
-프로젝트 & 세션 생성/조회
-"""
-
 from datetime import datetime
 from typing import List, Optional
 
