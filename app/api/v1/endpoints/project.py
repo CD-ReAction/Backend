@@ -46,7 +46,7 @@ class SessionOut(BaseModel):
 
 # ── 프로젝트 엔드포인트 ──────────────────────────────────
 
-@router.post("", ...)
+@router.post("", response_model=ProjectOut, status_code=201)
 async def create_project(
     body: ProjectCreate,
     db: AsyncSession = Depends(get_db),
@@ -68,7 +68,8 @@ async def create_project(
     )
 
 
-@router.get("/api/v1/projects", response_model=List[ProjectOut])
+@router.get("", response_model=List[ProjectOut])
+
 async def get_projects(db: AsyncSession = Depends(get_db)):
     """프로젝트 목록 조회"""
     result = await db.execute(select(Project).order_by(Project.created_at.desc()))
@@ -87,7 +88,7 @@ async def get_projects(db: AsyncSession = Depends(get_db)):
 
 # ── 세션 엔드포인트 ──────────────────────────────────────
 
-@router.post("/api/v1/projects/{project_id}/sessions", response_model=SessionOut, status_code=201)
+@router.post("/{project_id}/sessions", response_model=SessionOut, status_code=201)
 async def create_session(
     project_id: int,
     body: SessionCreate,
@@ -110,7 +111,7 @@ async def create_session(
     )
 
 
-@router.get("/api/v1/projects/{project_id}/sessions", response_model=List[SessionOut])
+@router.get("/{project_id}/sessions", response_model=List[SessionOut])
 async def get_sessions(
     project_id: int,
     db: AsyncSession = Depends(get_db),
