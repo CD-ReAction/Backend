@@ -1,10 +1,9 @@
 """
 feedback.py
 ───────────
-피드백 작성 및 조회
+피드백 작성, 조회, 수정, 삭제
 """
 
-from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -22,7 +21,12 @@ router = APIRouter(prefix="/sessions/{session_id}/feedbacks", tags=["feedback"])
 
 class FeedbackCreate(BaseModel):
     content: str
-    video_offset_seconds: Optional[float] = None  # 영상 타임스탬프
+    video_offset_seconds: Optional[float] = None
+
+
+class FeedbackUpdate(BaseModel):
+    content: Optional[str] = None
+    video_offset_seconds: Optional[float] = None
 
 
 class FeedbackOut(BaseModel):
@@ -85,6 +89,43 @@ async def get_feedbacks(
         )
         for f in feedbacks
     ]
+
+
+@router.patch("/{feedback_id}", response_model=FeedbackOut)
+async def update_feedback(
+    session_id: int,
+    feedback_id: int,
+    body: FeedbackUpdate,
+    db: AsyncSession = Depends(get_db),
+):
+    """피드백 수정 (content / video_offset_seconds 부분 수정 가능)"""
+    result = await db.execute(
+        select(Feedback).where(
+            Feedback.feedback_id == feedback_id,
+            Feedback.session_id == session_id,
+        )
+    )
+    feedback = result.scalar_one_or_none()
+    if not feedback:
+        raise HTTPException(status_code=404, detail="피드백을 찾을 수 없어요")
+
+    update_data = body.model_dump(exclude_unset=True)
+    if not update_data:
+        raise HTTPException(status_code=400, detail="수정할 내용이 없어요")
+
+    for key, value in update_data.items():
+        setattr(feedback, key, value)
+
+    await db.flush()
+    await db.refresh(feedback)
+
+    return FeedbackOut(
+        feedback_id=feedback.feedback_id,
+        session_id=feedback.session_id,
+        content=feedback.content,
+        video_offset_seconds=feedback.video_offset_seconds,
+        created_at=feedback.created_at.isoformat(),
+    )
 
 
 @router.delete("/{feedback_id}", status_code=204)
