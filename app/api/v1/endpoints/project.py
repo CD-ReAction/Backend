@@ -1,16 +1,14 @@
-from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.models.models import Project, Session
+from app.models.models import Project, ProjectMember, Session
 
 router = APIRouter(prefix="/projects", tags=["projects"])
-
 
 
 # ── 스키마 ──────────────────────────────────────────────
@@ -18,13 +16,19 @@ router = APIRouter(prefix="/projects", tags=["projects"])
 class ProjectCreate(BaseModel):
     title: str
     description: Optional[str] = None
+    join_code: str = Field(..., min_length=4, max_length=4)  # 사용자가 직접 입력
 
 
 class ProjectOut(BaseModel):
     project_id: int
     title: str
     description: Optional[str]
+    join_code: str
     created_at: str
+
+
+class JoinRequest(BaseModel):
+    join_code: str
 
 
 class SessionCreate(BaseModel):
@@ -38,6 +42,18 @@ class SessionOut(BaseModel):
     created_at: str
 
 
+# ── 헬퍼 ────────────────────────────────────────────────
+
+def _project_to_out(p: Project) -> ProjectOut:
+    return ProjectOut(
+        project_id=p.project_id,
+        title=p.title,
+        description=p.description,
+        join_code=p.join_code,
+        created_at=p.created_at.isoformat(),
+    )
+
+
 # ── 프로젝트 엔드포인트 ──────────────────────────────────
 
 @router.post("", response_model=ProjectOut, status_code=201)
@@ -45,39 +61,85 @@ async def create_project(
     body: ProjectCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """프로젝트 생성"""
+    """프로젝트 생성 (사용자가 직접 join_code 지정)"""
+    user_id = 1  # TODO: 인증 후 실제 user_id 사용
+
+    code = body.join_code.strip().upper()
+
+    # 코드 중복 검사
+    result = await db.execute(select(Project).where(Project.join_code == code))
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="이미 사용 중인 코드예요. 다른 코드를 입력해주세요")
+
     project = Project(
-        user_id=1,  # TODO: 인증 후 실제 user_id 사용
         title=body.title,
         description=body.description,
+        join_code=code,
     )
     db.add(project)
+    await db.flush()  # project_id 확보
+
+    # 생성자를 멤버로 자동 등록
+    db.add(ProjectMember(
+        project_id=project.project_id,
+        user_id=user_id,
+    ))
     await db.flush()
 
-    return ProjectOut(
-        project_id=project.project_id,
-        title=project.title,
-        description=project.description,
-        created_at=project.created_at.isoformat(),
-    )
+    return _project_to_out(project)
 
 
 @router.get("", response_model=List[ProjectOut])
+async def get_my_projects(db: AsyncSession = Depends(get_db)):
+    """내가 속한 프로젝트만 조회"""
+    user_id = 1  # TODO: 인증 후 실제 user_id 사용
 
-async def get_projects(db: AsyncSession = Depends(get_db)):
-    """프로젝트 목록 조회"""
-    result = await db.execute(select(Project).order_by(Project.created_at.desc()))
+    result = await db.execute(
+        select(Project)
+        .join(ProjectMember, ProjectMember.project_id == Project.project_id)
+        .where(ProjectMember.user_id == user_id)
+        .order_by(Project.created_at.desc())
+    )
     projects = result.scalars().all()
+    return [_project_to_out(p) for p in projects]
 
-    return [
-        ProjectOut(
-            project_id=p.project_id,
-            title=p.title,
-            description=p.description,
-            created_at=p.created_at.isoformat(),
+
+@router.post("/join", response_model=ProjectOut)
+async def join_project(
+    body: JoinRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """join_code로 프로젝트 참여"""
+    user_id = 1  # TODO: 인증 후 실제 user_id 사용
+
+    code = body.join_code.strip().upper()
+    if len(code) != 4:
+        raise HTTPException(status_code=400, detail="코드는 4자리여야 해요")
+
+    # 1. 코드로 프로젝트 찾기
+    result = await db.execute(select(Project).where(Project.join_code == code))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="유효하지 않은 코드예요")
+
+    # 2. 이미 참여 중인지 확인
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project.project_id,
+            ProjectMember.user_id == user_id,
         )
-        for p in projects
-    ]
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="이미 참여 중인 프로젝트예요")
+
+    # 3. 멤버로 등록
+    db.add(ProjectMember(
+        project_id=project.project_id,
+        user_id=user_id,
+    ))
+    await db.flush()
+
+    return _project_to_out(project)
 
 
 # ── 세션 엔드포인트 ──────────────────────────────────────
