@@ -19,6 +19,7 @@ app.add_middleware(
 API_PREFIX = "/api/v1"
 app.include_router(camera_session.router, prefix=API_PREFIX)
 app.include_router(video.router, prefix=API_PREFIX)
+app.include_router(video.analysis_router, prefix=API_PREFIX)
 app.include_router(feedback.router, prefix=API_PREFIX)
 
 

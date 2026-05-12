@@ -13,3 +13,4 @@ aiofiles
 python-dotenv
 greenlet
 boto3
+httpx
