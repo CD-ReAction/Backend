@@ -110,7 +110,7 @@ async def join_project(
     db: AsyncSession = Depends(get_db),
 ):
     """join_code로 프로젝트 참여"""
-    user_id = 1  # TODO: 인증 후 실제 user_id 사용
+    user_id = 2  # TODO: 인증 후 실제 user_id 사용
 
     code = body.join_code.strip().upper()
     if len(code) != 4:
