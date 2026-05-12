@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Re:Action — 카메라</title>
+  <script src="config.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #000;
+      color: white;
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .header {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      z-index: 10;
+      padding: 16px 20px;
+      background: linear-gradient(to bottom, rgba(0,0,0,0.6), transparent);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .header .dot {
+      width: 8px; height: 8px; border-radius: 50%;
+      background: #ccc; flex-shrink: 0;
+    }
+    .header .dot.ready { background: #22c55e; }
+    .header .dot.recording { background: #ef4444; animation: recBlink 1s infinite; }
+    .header .dot.done { background: #3b82f6; }
+    .header .dot.error { background: #ef4444; }
+    @keyframes recBlink { 0%,100%{opacity:1} 50%{opacity:0.3} }
+    .header .status-text { font-size: 14px; color: rgba(255,255,255,0.85); }
+    #videoPreview {
+      width: 100%; height: 100%;
+      object-fit: cover; flex: 1;
+    }
+    .controls {
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      z-index: 10;
+      padding: 20px 24px 48px;
+      background: linear-gradient(to top, rgba(0,0,0,0.75), transparent);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+    .record-btn {
+      width: 72px; height: 72px;
+      border-radius: 50%;
+      border: 4px solid white;
+      background: transparent;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.15s;
+    }
+    .record-btn:active { transform: scale(0.93); }
+    .record-inner {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      background: #ef4444;
+      transition: border-radius 0.25s, width 0.25s, height 0.25s;
+    }
+    .record-btn.recording .record-inner {
+      border-radius: 6px;
+      width: 26px; height: 26px;
+    }
+    .record-btn.stopped .record-inner { background: #555; }
+    .upload-btn {
+      display: none;
+      width: 100%; max-width: 320px;
+      padding: 15px;
+      background: white;
+      border: none; border-radius: 14px;
+      color: #111; font-size: 16px; font-weight: 600;
+      cursor: pointer; transition: opacity 0.2s;
+    }
+    .upload-btn:disabled { opacity: 0.5; cursor: default; }
+    .upload-btn.uploading { background: #3b82f6; color: white; }
+    .upload-btn.success { background: #22c55e; color: white; }
+    .msg { font-size: 13px; color: rgba(255,255,255,0.6); text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="dot" id="statusDot"></div>
+    <span class="status-text" id="statusText">카메라 준비 중...</span>
+  </div>
+
+  <video id="videoPreview" autoplay muted playsinline></video>
+
+  <div class="controls">
+    <button class="upload-btn" id="uploadBtn" onclick="uploadVideo()">영상 업로드</button>
+    <div class="record-btn" id="recordBtn" onclick="toggleRecord()">
+      <div class="record-inner"></div>
+    </div>
+    <div class="msg" id="msg"></div>
+  </div>
+
+<script>
+  const params = new URLSearchParams(location.search);
+  const SESSION_ID = params.get("session");      // camera-session ID (인메모리)
+  const DB_SESSION_ID = params.get("db_session"); // DB sessions 테이블 ID
+
+  let mediaRecorder = null;
+  let chunks = [];
+  let stream = null;
+  let recording = false;
+  let videoBlob = null;
+
+  async function init() {
+    if (!SESSION_ID || !DB_SESSION_ID) {
+      setStatus("error", "올바르지 않은 QR 코드예요");
+      return;
+    }
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "environment" },
+        audio: true,
+      });
+      document.getElementById("videoPreview").srcObject = stream;
+      setStatus("ready", "촬영 버튼을 눌러 시작하세요");
+
+      // 연결됨 알림
+      await fetch(
+        `${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/connect`,
+        { method: "POST" }
+      );
+    } catch (e) {
+      setStatus("error", "카메라 접근 실패 — 권한을 허용해주세요");
+    }
+  }
+
+  function toggleRecord() {
+    if (!recording) startRecord();
+    else stopRecord();
+  }
+
+  function startRecord() {
+    if (!stream) return;
+    chunks = [];
+    mediaRecorder = new MediaRecorder(stream, { mimeType: "video/webm" });
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      videoBlob = new Blob(chunks, { type: "video/webm" });
+      document.getElementById("uploadBtn").style.display = "block";
+      setStatus("ready", "촬영 완료! 업로드 버튼을 눌러주세요");
+    };
+    mediaRecorder.start();
+    recording = true;
+    document.getElementById("recordBtn").className = "record-btn recording";
+    setStatus("recording", "녹화 중...");
+  }
+
+  function stopRecord() {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+    recording = false;
+    document.getElementById("recordBtn").className = "record-btn stopped";
+  }
+
+  async function uploadVideo() {
+    if (!videoBlob) return;
+    const btn = document.getElementById("uploadBtn");
+    btn.disabled = true;
+    btn.className = "upload-btn uploading";
+    btn.textContent = "업로드 중...";
+    setMsg("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", videoBlob, `recording_${SESSION_ID}.webm`);
+
+      // DB_SESSION_ID를 URL에서 받아서 동적으로 사용!
+      const res = await fetch(
+        `${CONFIG.API_BASE_URL}/api/v1/sessions/${DB_SESSION_ID}/video/upload`,
+        { method: "POST", body: formData }
+      );
+      if (!res.ok) throw new Error("업로드 실패");
+      const data = await res.json();
+
+      // 완료 알림
+      await fetch(
+        `${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/done?video_url=${encodeURIComponent(data.s3_url || "")}`,
+        { method: "POST" }
+      );
+
+      btn.className = "upload-btn success";
+      btn.textContent = "업로드 완료 ✅";
+      setStatus("done", "모든 작업이 완료됐어요!");
+    } catch (e) {
+      btn.disabled = false;
+      btn.className = "upload-btn";
+      btn.textContent = "다시 업로드";
+      setMsg(`업로드 실패: ${e.message}`);
+    }
+  }
+
+  function setStatus(type, text) {
+    document.getElementById("statusDot").className = `dot ${type}`;
+    document.getElementById("statusText").textContent = text;
+  }
+  function setMsg(t) { document.getElementById("msg").textContent = t; }
+
+  init();
+</script>
+</body>
+</html>

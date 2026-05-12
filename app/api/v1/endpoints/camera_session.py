@@ -26,6 +26,7 @@ class CameraSessionResponse(BaseModel):
     code: str
     camera_url: str
     expires_at: str
+    db_session_id: int  # DB 세션 ID
 
 
 class CameraStatusResponse(BaseModel):
@@ -48,15 +49,22 @@ def _make_code() -> str:
 # ── 엔드포인트 ───────────────────────────────────────────
 
 @router.post("/create", response_model=CameraSessionResponse)
-def create_camera_session(pwa_base_url: str = "https://your-pwa.netlify.app"):
+def create_camera_session(
+    db_session_id: int,  # DB sessions 테이블의 session_id
+    pwa_base_url: str = "https://reaction-camera-connection.netlify.app",
+):
     """노트북에서 호출 — QR용 임시 세션 생성"""
     session_id = secrets.token_urlsafe(12)
     code = _make_code()
     expires_at = datetime.utcnow() + timedelta(minutes=10)
-    camera_url = f"{pwa_base_url}/camera.html?session={session_id}&code={code}"
+    camera_url = (
+        f"{pwa_base_url}/camera.html"
+        f"?session={session_id}&code={code}&db_session={db_session_id}"
+    )
 
     _sessions[session_id] = {
         "session_id": session_id,
+        "db_session_id": db_session_id,
         "code": code,
         "camera_url": camera_url,
         "status": "waiting",
@@ -70,6 +78,7 @@ def create_camera_session(pwa_base_url: str = "https://your-pwa.netlify.app"):
         code=code,
         camera_url=camera_url,
         expires_at=expires_at.isoformat(),
+        db_session_id=db_session_id,
     )
 
 
