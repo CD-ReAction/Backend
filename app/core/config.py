@@ -19,6 +19,11 @@ class Settings(BaseSettings):
     # File Upload
     MAX_VIDEO_SIZE_MB: int = 2048
 
+    # Face Analyzer service
+    FACE_ANALYZER_URL: str | None = None
+    FACE_ANALYZER_SECRET: str | None = None
+    PUBLIC_API_BASE_URL: str | None = None
+
     class Config:
         env_file = ".env"
 
