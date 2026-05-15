@@ -67,7 +67,7 @@ def create_camera_session(
         "db_session_id": db_session_id,
         "code": code,
         "camera_url": camera_url,
-        "status": "waiting",
+        "status": "yet",
         "expires_at": expires_at,
         "connected_at": None,
         "video_url": None,
@@ -102,12 +102,10 @@ def get_camera_session_status(session_id: str):
 
 @router.post("/{session_id}/connect")
 def mark_connected(session_id: str):
-    """핸드폰이 QR 접속 직후 자동 호출 → 노트북 화면 '연결됨' 전환"""
     s = _sessions.get(session_id)
     if not s:
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
-
-    s["status"] = "connected"
+    s["status"] = "connect"    
     s["connected_at"] = datetime.utcnow().isoformat()
     return {"ok": True}
 
@@ -121,4 +119,12 @@ def mark_done(session_id: str, video_url: str = ""):
 
     s["status"] = "done"
     s["video_url"] = video_url
+    return {"ok": True}
+
+@router.post("/{session_id}/recording")
+def mark_recording(session_id: str):
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
+    s["status"] = "recording"
     return {"ok": True}
