@@ -158,7 +158,12 @@
     recording = true;
     document.getElementById("recordBtn").className = "record-btn recording";
     setStatus("recording", "녹화 중...");
+
+    fetch(`${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/recording`, { method: "POST" });
+
   }
+
+
 
   function stopRecord() {
     if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();

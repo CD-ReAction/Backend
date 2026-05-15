@@ -102,3 +102,15 @@ class Feedback(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("Session", back_populates="feedbacks")
+
+class CameraSession(Base): #camera-connection
+    __tablename__ = "camera_sessions"
+
+    id = Column(String, primary_key=True)
+    db_session_id = Column(Integer, nullable=False)
+    code = Column(String, nullable=False)
+    camera_url = Column(String, nullable=False)
+    status = Column(String, default="yet")
+    expires_at = Column(DateTime, nullable=False)
+    connected_at = Column(DateTime, nullable=True)
+    video_url = Column(String, nullable=True)
