@@ -87,6 +87,16 @@
     .upload-btn.uploading { background: #3b82f6; color: white; }
     .upload-btn.success { background: #22c55e; color: white; }
     .msg { font-size: 13px; color: rgba(255,255,255,0.6); text-align: center; }
+    .progress {
+      width: 100%; max-width: 320px; height: 6px;
+      background: rgba(255,255,255,0.15);
+      border-radius: 3px; overflow: hidden;
+      display: none;
+    }
+    .progress-bar {
+      height: 100%; width: 0%;
+      background: #3b82f6; transition: width 0.2s;
+    }
   </style>
 </head>
 <body>
@@ -98,6 +108,7 @@
   <video id="videoPreview" autoplay muted playsinline></video>
 
   <div class="controls">
+    <div class="progress" id="progress"><div class="progress-bar" id="progressBar"></div></div>
     <button class="upload-btn" id="uploadBtn" onclick="uploadVideo()">영상 업로드</button>
     <div class="record-btn" id="recordBtn" onclick="toggleRecord()">
       <div class="record-inner"></div>
@@ -110,12 +121,107 @@
   const SESSION_ID = params.get("session");      // camera-session ID (인메모리)
   const DB_SESSION_ID = params.get("db_session"); // DB sessions 테이블 ID
 
+  // 녹화 품질: 1080p / 4Mbps → 1시간 약 1.8GB, 표정 분석에 충분
+  const TARGET_VIDEO_BPS = 4_000_000;
+  const TARGET_AUDIO_BPS = 128_000;
+  // 5초 단위 청크 → 끊겨도 5초 이내 손실, IndexedDB로 백업
+  const CHUNK_TIMESLICE_MS = 5000;
+  // 업로드 파트 크기: 백엔드 UPLOAD_PART_SIZE_MB (8MB) 와 일치시킴
+  const UPLOAD_PART_SIZE = 8 * 1024 * 1024;
+  // 동시 업로드 파트 수
+  const UPLOAD_CONCURRENCY = 4;
+
   let mediaRecorder = null;
-  let chunks = [];
   let stream = null;
   let recording = false;
   let videoBlob = null;
+  let currentMimeType = "";
+  let pendingChunkWrites = 0;
 
+  // ──────────────────────────────────────────────────────────────────
+  // MediaRecorder mimeType picker (VP9 → VP8 → MP4 H.264 → 기본)
+  // ──────────────────────────────────────────────────────────────────
+  function pickMimeType() {
+    const candidates = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm",
+      "video/mp4;codecs=h264,aac",
+      "video/mp4",
+    ];
+    for (const t of candidates) {
+      if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
+    }
+    return "";
+  }
+  // 업로드 시 서버에 보낼 content-type (codecs 파라미터는 떼야 ALLOWED_MIME 통과)
+  function baseMime(m) {
+    if (!m) return "video/webm";
+    const base = m.split(";")[0].trim();
+    return base === "video/webm" || base === "video/mp4" || base === "video/quicktime"
+      ? base : "video/webm";
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // IndexedDB: 청크 단위 저장으로 탭 닫혀도 복구 가능
+  // ──────────────────────────────────────────────────────────────────
+  const IDB_NAME = "reaction-recordings";
+  const IDB_STORE = "chunks";
+
+  function openIdb() {
+    return new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(IDB_STORE)) {
+          const store = db.createObjectStore(IDB_STORE, { keyPath: "id", autoIncrement: true });
+          store.createIndex("sessionId", "sessionId", { unique: false });
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+  }
+
+  async function idbAddChunk(sessionId, mimeType, blob) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      tx.objectStore(IDB_STORE).add({ sessionId, mimeType, blob, ts: Date.now() });
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    });
+  }
+
+  async function idbGetChunks(sessionId) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readonly");
+      const idx = tx.objectStore(IDB_STORE).index("sessionId");
+      const req = idx.getAll(IDBKeyRange.only(String(sessionId)));
+      req.onsuccess = () => { db.close(); resolve((req.result || []).sort((a,b) => a.id - b.id)); };
+      req.onerror = () => { db.close(); reject(req.error); };
+    });
+  }
+
+  async function idbClearChunks(sessionId) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, "readwrite");
+      const idx = tx.objectStore(IDB_STORE).index("sessionId");
+      const req = idx.openCursor(IDBKeyRange.only(String(sessionId)));
+      req.onsuccess = () => {
+        const cursor = req.result;
+        if (cursor) { cursor.delete(); cursor.continue(); }
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // 카메라 초기화 + 미완료 녹화 복구
+  // ──────────────────────────────────────────────────────────────────
   async function init() {
     if (!SESSION_ID || !DB_SESSION_ID) {
       setStatus("error", "올바르지 않은 QR 코드예요");
@@ -123,38 +229,96 @@
     }
     try {
       stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: "environment" },
+        video: {
+          facingMode: "environment",
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
         audio: true,
       });
       document.getElementById("videoPreview").srcObject = stream;
       setStatus("ready", "촬영 버튼을 눌러 시작하세요");
 
-      // 연결됨 알림
       await fetch(
         `${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/connect`,
         { method: "POST" }
       );
+
+      // 이전 세션에서 남은 청크 복구
+      try {
+        const leftover = await idbGetChunks(String(DB_SESSION_ID));
+        if (leftover.length > 0) {
+          const totalMb = (leftover.reduce((s, c) => s + c.blob.size, 0) / (1024*1024)).toFixed(1);
+          const ok = confirm(`이전 녹화 ${leftover.length}개 조각(${totalMb}MB)이 남아있어요. 복구해서 업로드할까요?`);
+          if (ok) {
+            currentMimeType = leftover[0].mimeType || "video/webm";
+            videoBlob = new Blob(leftover.map(c => c.blob), { type: baseMime(currentMimeType) });
+            document.getElementById("uploadBtn").style.display = "block";
+            setStatus("ready", "복구된 영상 — 업로드 버튼을 눌러주세요");
+          } else {
+            await idbClearChunks(String(DB_SESSION_ID));
+          }
+        }
+      } catch (err) {
+        console.warn("청크 복구 실패", err);
+      }
     } catch (e) {
       setStatus("error", "카메라 접근 실패 — 권한을 허용해주세요");
     }
   }
 
+  // ──────────────────────────────────────────────────────────────────
+  // 녹화
+  // ──────────────────────────────────────────────────────────────────
   function toggleRecord() {
     if (!recording) startRecord();
     else stopRecord();
   }
 
-  function startRecord() {
+  async function startRecord() {
     if (!stream) return;
-    chunks = [];
-    mediaRecorder = new MediaRecorder(stream, { mimeType: "video/webm" });
-    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
-    mediaRecorder.onstop = () => {
-      videoBlob = new Blob(chunks, { type: "video/webm" });
+    // 새 녹화 시작 전 이전 청크 정리
+    try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
+    videoBlob = null;
+    document.getElementById("uploadBtn").style.display = "none";
+
+    currentMimeType = pickMimeType();
+    const options = {
+      videoBitsPerSecond: TARGET_VIDEO_BPS,
+      audioBitsPerSecond: TARGET_AUDIO_BPS,
+    };
+    if (currentMimeType) options.mimeType = currentMimeType;
+
+    try {
+      mediaRecorder = new MediaRecorder(stream, options);
+    } catch (e) {
+      // 일부 기기는 bitrate 옵션을 거부 → fallback
+      mediaRecorder = new MediaRecorder(stream, currentMimeType ? { mimeType: currentMimeType } : undefined);
+    }
+
+    pendingChunkWrites = 0;
+    mediaRecorder.ondataavailable = async (e) => {
+      if (e.data.size === 0) return;
+      pendingChunkWrites++;
+      try {
+        await idbAddChunk(String(DB_SESSION_ID), currentMimeType || e.data.type, e.data);
+      } catch (err) {
+        console.warn("청크 저장 실패", err);
+      } finally {
+        pendingChunkWrites--;
+      }
+    };
+    mediaRecorder.onstop = async () => {
+      // ondataavailable이 비동기라 IDB 쓰기 끝날 때까지 대기
+      while (pendingChunkWrites > 0) await new Promise(r => setTimeout(r, 50));
+      const stored = await idbGetChunks(String(DB_SESSION_ID));
+      const type = baseMime(stored[0]?.mimeType || currentMimeType);
+      videoBlob = new Blob(stored.map(c => c.blob), { type });
       document.getElementById("uploadBtn").style.display = "block";
       setStatus("ready", "촬영 완료! 업로드 버튼을 눌러주세요");
     };
-    mediaRecorder.start();
+
+    mediaRecorder.start(CHUNK_TIMESLICE_MS);
     recording = true;
     document.getElementById("recordBtn").className = "record-btn recording";
     setStatus("recording", "녹화 중...");
@@ -171,36 +335,130 @@
     document.getElementById("recordBtn").className = "record-btn stopped";
   }
 
+  // ──────────────────────────────────────────────────────────────────
+  // 업로드: S3 multipart presigned URL로 폰 → S3 직접
+  // ──────────────────────────────────────────────────────────────────
+  function setProgress(pct) {
+    const wrap = document.getElementById("progress");
+    const bar = document.getElementById("progressBar");
+    wrap.style.display = "block";
+    bar.style.width = `${Math.min(100, Math.max(0, pct)).toFixed(1)}%`;
+  }
+  function hideProgress() {
+    document.getElementById("progress").style.display = "none";
+  }
+
+  async function putWithRetry(url, blob, maxAttempts = 4) {
+    let attempt = 0;
+    let lastErr;
+    while (attempt < maxAttempts) {
+      try {
+        const res = await fetch(url, { method: "PUT", body: blob });
+        if (!res.ok) throw new Error(`PUT ${res.status}`);
+        const etag = res.headers.get("ETag");
+        if (!etag) throw new Error("ETag 없음 (CORS ExposeHeaders 확인)");
+        return etag.replaceAll('"', "");
+      } catch (e) {
+        lastErr = e;
+        attempt++;
+        // 지수 backoff: 0.5s, 1s, 2s, 4s
+        await new Promise(r => setTimeout(r, 500 * Math.pow(2, attempt - 1)));
+      }
+    }
+    throw lastErr;
+  }
+
   async function uploadVideo() {
     if (!videoBlob) return;
     const btn = document.getElementById("uploadBtn");
     btn.disabled = true;
     btn.className = "upload-btn uploading";
-    btn.textContent = "업로드 중...";
+    btn.textContent = "업로드 준비 중...";
     setMsg("");
+    setProgress(0);
+
+    const apiBase = `${CONFIG.API_BASE_URL}/api/v1/sessions/${DB_SESSION_ID}/video`;
+    const contentType = baseMime(currentMimeType || videoBlob.type);
+    let uploadId, s3Key, partSize, partCount;
 
     try {
-      const formData = new FormData();
-      formData.append("file", videoBlob, `recording_${SESSION_ID}.webm`);
+      // 1) init
+      const initRes = await fetch(`${apiBase}/upload/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          content_type: contentType,
+          file_size: videoBlob.size,
+        }),
+      });
+      if (!initRes.ok) throw new Error(`init 실패 (${initRes.status})`);
+      ({ upload_id: uploadId, s3_key: s3Key, part_size: partSize, part_count: partCount } = await initRes.json());
 
-      // DB_SESSION_ID를 URL에서 받아서 동적으로 사용!
-      const res = await fetch(
-        `${CONFIG.API_BASE_URL}/api/v1/sessions/${DB_SESSION_ID}/video/upload`,
-        { method: "POST", body: formData }
+      // 2) part-urls (한 번에 다 발급)
+      const partNumbers = Array.from({ length: partCount }, (_, i) => i + 1);
+      const urlsRes = await fetch(`${apiBase}/upload/part-urls`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ upload_id: uploadId, s3_key: s3Key, part_numbers: partNumbers }),
+      });
+      if (!urlsRes.ok) throw new Error(`part-urls 실패 (${urlsRes.status})`);
+      const { urls } = await urlsRes.json();
+
+      // 3) 병렬 PUT (UPLOAD_CONCURRENCY 만큼 동시 진행)
+      btn.textContent = "업로드 중... 0%";
+      const etags = new Array(partCount);
+      let completed = 0;
+
+      async function worker(queue) {
+        while (queue.length > 0) {
+          const n = queue.shift();
+          const start = (n - 1) * partSize;
+          const end = Math.min(start + partSize, videoBlob.size);
+          const chunk = videoBlob.slice(start, end);
+          const etag = await putWithRetry(urls[n], chunk);
+          etags[n - 1] = { part_number: n, etag };
+          completed++;
+          const pct = (completed / partCount) * 100;
+          setProgress(pct);
+          btn.textContent = `업로드 중... ${pct.toFixed(0)}%`;
+        }
+      }
+      const queue = [...partNumbers];
+      await Promise.all(
+        Array.from({ length: Math.min(UPLOAD_CONCURRENCY, partCount) }, () => worker(queue))
       );
-      if (!res.ok) throw new Error("업로드 실패");
-      const data = await res.json();
 
-      // 완료 알림
+      // 4) complete
+      btn.textContent = "조립 중...";
+      const completeRes = await fetch(`${apiBase}/upload/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ upload_id: uploadId, s3_key: s3Key, parts: etags }),
+      });
+      if (!completeRes.ok) throw new Error(`complete 실패 (${completeRes.status})`);
+      const data = await completeRes.json();
+
+      // 5) 카메라 세션 done + IDB 정리
       await fetch(
         `${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/done?video_url=${encodeURIComponent(data.s3_url || "")}`,
         { method: "POST" }
       );
+      try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
 
+      hideProgress();
       btn.className = "upload-btn success";
       btn.textContent = "업로드 완료 ✅";
       setStatus("done", "모든 작업이 완료됐어요!");
     } catch (e) {
+      // 실패 시 S3 조각 정리 시도 (best effort)
+      if (uploadId && s3Key) {
+        fetch(`${apiBase}/upload/abort`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ upload_id: uploadId, s3_key: s3Key }),
+        }).catch(() => {});
+      }
+      hideProgress();
       btn.disabled = false;
       btn.className = "upload-btn";
       btn.textContent = "다시 업로드";

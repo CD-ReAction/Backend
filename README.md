@@ -51,3 +51,30 @@ source $(poetry env info --path)/bin/activate
 ```bash
 uvicorn app.main:app --reload
 ```
+
+## S3 CORS 설정 (영상 업로드 필수)
+
+PWA가 S3에 **직접** multipart PUT을 하려면 버킷 CORS에서 PUT 허용 + `ETag` 헤더 노출이 필요해요.
+S3 콘솔 → 버킷 → Permissions → CORS 에 아래 정책 적용:
+
+```json
+[
+  {
+    "AllowedOrigins": [
+      "https://reaction-camera-connection.netlify.app",
+      "http://localhost:8000",
+      "http://localhost:5173"
+    ],
+    "AllowedMethods": ["PUT", "GET", "HEAD"],
+    "AllowedHeaders": ["*"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3000
+  }
+]
+```
+
+> `ExposeHeaders: ["ETag"]` 빠지면 브라우저가 ETag를 못 읽어서 `complete`가 실패해요.
+
+추가로 **버킷 Lifecycle 규칙**으로 미완료 multipart 업로드를 N일 후 자동 정리 권장
+(콘솔 → Management → Lifecycle rules → "Delete incomplete multipart uploads after 7 days").
+

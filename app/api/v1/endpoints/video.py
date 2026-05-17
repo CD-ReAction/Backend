@@ -1,29 +1,47 @@
 """
 video.py
 ────────
-영상 업로드 (S3) 및 face-analysis 트리거
+영상 업로드 (S3 multipart) 및 face-analysis 트리거.
+
+업로드 흐름:
+  1) POST .../video/upload/init       → upload_id + s3_key 발급
+  2) POST .../video/upload/part-urls  → 파트별 presigned PUT URL 발급
+     (PWA가 이 URL들로 S3에 직접 PUT, 서버는 바이트를 보지 않음)
+  3) POST .../video/upload/complete   → S3 조립 + Video row 업데이트 + analyzer 트리거
+  실패/취소 시: POST .../video/upload/abort
 """
 
 import json
+import math
 import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, UploadFile, File
-from pydantic import BaseModel
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
 from app.core.config import settings
 from app.core.face_analyzer import request_face_analysis
-from app.core.s3 import upload_video
+from app.core.s3 import (
+    abort_multipart_upload,
+    complete_multipart_upload,
+    create_multipart_upload,
+    generate_part_upload_url,
+    s3_object_url,
+)
 from app.models.models import Video, Session
 
 router = APIRouter(prefix="/sessions/{session_id}/video", tags=["video"])
 analysis_router = APIRouter(prefix="/videos", tags=["video"])
 
-ALLOWED_MIME = {"video/mp4", "video/quicktime", "video/webm", "application/octet-stream"}
+ALLOWED_MIME = {
+    "video/mp4": "mp4",
+    "video/quicktime": "mov",
+    "video/webm": "webm",
+}
 
 
 class AnalysisCallbackPayload(BaseModel):
@@ -42,60 +60,181 @@ def _decode_analysis_result(raw_result: str | None) -> Any:
         return raw_result
 
 
-@router.post("/upload")
-async def upload_video_file(
+# ─────────────────────────────────────────────────────────────────────────────
+# Multipart upload
+# ─────────────────────────────────────────────────────────────────────────────
+
+class InitUploadRequest(BaseModel):
+    content_type: str = Field(..., description="video/webm | video/mp4 | video/quicktime")
+    file_size: int = Field(..., gt=0, description="전체 파일 크기(bytes)")
+
+    @field_validator("content_type")
+    @classmethod
+    def _check_mime(cls, v: str) -> str:
+        if v not in ALLOWED_MIME:
+            raise ValueError("지원하지 않는 영상 형식이에요")
+        return v
+
+
+class InitUploadResponse(BaseModel):
+    upload_id: str
+    s3_key: str
+    video_id: int
+    part_size: int
+    part_count: int
+
+
+class PartUrlsRequest(BaseModel):
+    upload_id: str
+    s3_key: str
+    part_numbers: list[int] = Field(..., min_length=1)
+
+
+class PartUrlsResponse(BaseModel):
+    urls: dict[int, str]
+    expires_in: int
+
+
+class CompletedPart(BaseModel):
+    part_number: int = Field(..., ge=1)
+    etag: str
+
+
+class CompleteUploadRequest(BaseModel):
+    upload_id: str
+    s3_key: str
+    parts: list[CompletedPart] = Field(..., min_length=1)
+
+
+class AbortUploadRequest(BaseModel):
+    upload_id: str
+    s3_key: str
+
+
+@router.post("/upload/init", response_model=InitUploadResponse)
+async def init_video_upload(
     session_id: int,
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
+    payload: InitUploadRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """핸드폰에서 촬영한 영상 S3에 업로드"""
-    if file.content_type not in ALLOWED_MIME:
-        raise HTTPException(status_code=400, detail="지원하지 않는 영상 형식이에요")
-
-    # 파일 크기 제한
-    content = await file.read()
+    """multipart 업로드 시작. Video row 생성/초기화."""
     max_bytes = settings.MAX_VIDEO_SIZE_MB * 1024 * 1024
-    if len(content) > max_bytes:
-        raise HTTPException(status_code=413, detail=f"영상이 {settings.MAX_VIDEO_SIZE_MB}MB를 초과해요")
+    if payload.file_size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"영상이 {settings.MAX_VIDEO_SIZE_MB}MB를 초과해요",
+        )
 
-    # S3 업로드
-    s3_key = f"videos/{session_id}/{uuid.uuid4().hex}.webm"
-    s3_url = await upload_video(content, s3_key, file.content_type or "video/webm")
+    part_size = settings.UPLOAD_PART_SIZE_MB * 1024 * 1024
+    part_count = math.ceil(payload.file_size / part_size)
+    if part_count > settings.UPLOAD_MAX_PARTS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"파트 수가 {settings.UPLOAD_MAX_PARTS}개를 초과해요",
+        )
 
-    # DB 저장
+    ext = ALLOWED_MIME[payload.content_type]
+    s3_key = f"videos/{session_id}/{uuid.uuid4().hex}.{ext}"
+    upload_id = await create_multipart_upload(s3_key, payload.content_type)
+
     result = await db.execute(select(Video).where(Video.session_id == session_id))
     video = result.scalar_one_or_none()
-
     if video:
         video.s3_key = s3_key
-        video.s3_url = s3_url
-        video.record_ended_at = datetime.utcnow()
-        video.analysis_status = "pending"
+        video.s3_url = None
+        video.analysis_status = "uploading"
         video.analysis_result = None
+        video.record_started_at = video.record_started_at or datetime.utcnow()
+        video.record_ended_at = None
     else:
         video = Video(
             session_id=session_id,
             s3_key=s3_key,
-            s3_url=s3_url,
-            record_ended_at=datetime.utcnow(),
-            analysis_status="pending",
+            s3_url=None,
+            analysis_status="uploading",
+            record_started_at=datetime.utcnow(),
         )
         db.add(video)
 
-    # 세션 in_progress 종료
+    await db.flush()
+    await db.commit()
+
+    return InitUploadResponse(
+        upload_id=upload_id,
+        s3_key=s3_key,
+        video_id=video.video_id,
+        part_size=part_size,
+        part_count=part_count,
+    )
+
+
+@router.post("/upload/part-urls", response_model=PartUrlsResponse)
+async def get_upload_part_urls(
+    session_id: int,
+    payload: PartUrlsRequest,
+):
+    """파트별 presigned PUT URL 발급. 클라이언트가 이 URL로 S3에 직접 PUT."""
+    # 한 번에 너무 많이 발급 못 하게 제한
+    if len(payload.part_numbers) > settings.UPLOAD_MAX_PARTS:
+        raise HTTPException(status_code=400, detail="요청 파트 수가 너무 많아요")
+
+    if not payload.s3_key.startswith(f"videos/{session_id}/"):
+        raise HTTPException(status_code=400, detail="잘못된 s3_key")
+
+    urls: dict[int, str] = {}
+    for n in payload.part_numbers:
+        if n < 1 or n > settings.UPLOAD_MAX_PARTS:
+            raise HTTPException(status_code=400, detail=f"잘못된 part_number: {n}")
+        urls[n] = await generate_part_upload_url(
+            payload.s3_key,
+            payload.upload_id,
+            n,
+            expires_in=settings.UPLOAD_URL_EXPIRES_SECONDS,
+        )
+
+    return PartUrlsResponse(urls=urls, expires_in=settings.UPLOAD_URL_EXPIRES_SECONDS)
+
+
+@router.post("/upload/complete")
+async def complete_video_upload(
+    session_id: int,
+    payload: CompleteUploadRequest,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    """모든 파트 업로드 후 S3에 조립 요청. analyzer 트리거."""
+    if not payload.s3_key.startswith(f"videos/{session_id}/"):
+        raise HTTPException(status_code=400, detail="잘못된 s3_key")
+
+    result = await db.execute(select(Video).where(Video.session_id == session_id))
+    video = result.scalar_one_or_none()
+    if not video or video.s3_key != payload.s3_key:
+        raise HTTPException(status_code=404, detail="업로드 세션을 찾을 수 없어요")
+
+    parts_payload = [
+        {"PartNumber": p.part_number, "ETag": p.etag}
+        for p in payload.parts
+    ]
+    s3_url = await complete_multipart_upload(payload.s3_key, payload.upload_id, parts_payload)
+
+    video.s3_url = s3_url
+    video.record_ended_at = datetime.utcnow()
+    video.analysis_status = "pending"
+    video.analysis_result = None
+
     sess_result = await db.execute(select(Session).where(Session.session_id == session_id))
-    session = sess_result.scalar_one_or_none()
-    if session:
-        session.in_progress = False
+    sess = sess_result.scalar_one_or_none()
+    if sess:
+        sess.in_progress = False
 
     await db.flush()
     await db.commit()
+
     background_tasks.add_task(
         request_face_analysis,
         video_id=video.video_id,
         session_id=session_id,
-        s3_key=s3_key,
+        s3_key=payload.s3_key,
         s3_url=s3_url,
     )
 
@@ -105,6 +244,33 @@ async def upload_video_file(
         "analysis_status": "pending",
     }
 
+
+@router.post("/upload/abort")
+async def abort_video_upload(
+    session_id: int,
+    payload: AbortUploadRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """업로드 취소. S3 조각 정리 + Video row 정리."""
+    if not payload.s3_key.startswith(f"videos/{session_id}/"):
+        raise HTTPException(status_code=400, detail="잘못된 s3_key")
+
+    await abort_multipart_upload(payload.s3_key, payload.upload_id)
+
+    result = await db.execute(select(Video).where(Video.session_id == session_id))
+    video = result.scalar_one_or_none()
+    if video and video.s3_key == payload.s3_key and video.analysis_status == "uploading":
+        video.s3_key = None
+        video.analysis_status = "pending"
+        await db.flush()
+        await db.commit()
+
+    return {"aborted": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 조회 / 재분석 / 콜백
+# ─────────────────────────────────────────────────────────────────────────────
 
 @router.get("")
 async def get_video(
