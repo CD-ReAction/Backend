@@ -16,8 +16,11 @@ class Settings(BaseSettings):
     AWS_REGION: str = "ap-northeast-2"
     S3_BUCKET_NAME: str
 
-    # File Upload
-    MAX_VIDEO_SIZE_MB: int = 2048
+    # File Upload (multipart)
+    MAX_VIDEO_SIZE_MB: int = 8192          # 1시간 1080p@4Mbps ≈ 1.8GB, 여유 두고 8GB
+    UPLOAD_PART_SIZE_MB: int = 8           # 권장 5~10MB, S3 최소 5MB
+    UPLOAD_MAX_PARTS: int = 1024           # 8MB × 1024 = 8GB까지
+    UPLOAD_URL_EXPIRES_SECONDS: int = 3600 # 파트별 presigned URL 유효시간
 
     # Face Analyzer service
     FACE_ANALYZER_URL: str | None = None
