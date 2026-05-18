@@ -6,7 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.models.models import Project, ProjectMember, Session
+from app.models.models import Project, ProjectMember, Session, SessionCategory
+
+
+
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 
@@ -33,6 +36,7 @@ class JoinRequest(BaseModel):
 
 class SessionCreate(BaseModel):
     title: Optional[str] = None
+    s_category: SessionCategory 
 
 
 class SessionOut(BaseModel):

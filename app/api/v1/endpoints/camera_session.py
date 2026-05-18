@@ -128,3 +128,12 @@ def mark_recording(session_id: str):
         raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
     s["status"] = "recording"
     return {"ok": True}
+
+@router.post("/{session_id}/stop")
+def mark_stop_recording(session_id: str):
+    """녹화 종료 버튼 누를 때 호출 → status: end"""
+    s = _sessions.get(session_id)
+    if not s:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
+    s["status"] = "end"
+    return {"ok": True, "status": "end"}

@@ -1,8 +1,10 @@
 from datetime import datetime
+import enum # 세션 카테고리를 Enum으로 정의하기 위해 enum 모듈을 import
+
 
 from sqlalchemy import (
     Boolean, Column, DateTime, ForeignKey, Integer, String, Text, Float,
-    UniqueConstraint,
+    UniqueConstraint, Enum
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship
@@ -83,6 +85,11 @@ class VideoActor(Base):
         UniqueConstraint("video_id", "actor_id", name="uq_video_actor"),
     )
 
+class SessionCategory(str, enum.Enum):
+    CATEGORY_A = "장면별 연습"
+    CATEGORY_B = "워크쓰루"
+    CATEGORY_C = "런쓰루"
+    CATEGORY_D = "텐투텐"
 
 class Session(Base):
     __tablename__ = "sessions"
@@ -90,6 +97,7 @@ class Session(Base):
     session_id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.project_id"), nullable=False)
     title = Column(String, nullable=True)
+    s_category = Column(Enum(SessionCategory), nullable=False)
     in_progress = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 

@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     FACE_ANALYZER_SECRET: str | None = None
     PUBLIC_API_BASE_URL: str | None = None
 
+    ANALYZER_SECRET: str = ""
+    CALLBACK_SECRET: str = ""
+
     class Config:
         env_file = ".env"
 
