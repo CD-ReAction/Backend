@@ -39,6 +39,7 @@ class SessionOut(BaseModel):
     session_id: int
     project_id: int
     title: Optional[str]
+    in_progress: bool  # True = 진행중, False = 진행 완료 (영상 업로드 완료 시 자동 False)
     created_at: str
 
 
@@ -163,6 +164,7 @@ async def create_session(
         session_id=session.session_id,
         project_id=session.project_id,
         title=session.title,
+        in_progress=session.in_progress,
         created_at=session.created_at.isoformat(),
     )
 
@@ -185,6 +187,7 @@ async def get_sessions(
             session_id=s.session_id,
             project_id=s.project_id,
             title=s.title,
+            in_progress=s.in_progress,
             created_at=s.created_at.isoformat(),
         )
         for s in sessions
