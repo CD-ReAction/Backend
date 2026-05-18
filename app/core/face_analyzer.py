@@ -1,4 +1,5 @@
 import logging
+from typing import Any
 
 import httpx
 
@@ -19,8 +20,14 @@ async def request_face_analysis(
     session_id: int,
     s3_key: str,
     s3_url: str,
+    known_actors: list[dict[str, Any]] | None = None,
 ) -> bool:
-    """Ask the external face analyzer service to process an uploaded video."""
+    """외부 face-analyzer 서비스에 분석 요청.
+
+    known_actors: 같은 프로젝트의 기존 배우 리스트 — analyzer가 ActorMatcher로
+    유사도 비교 후 matched / new_candidates 로 분기해 콜백.
+    형식: [{"actor_id": int, "embedding": list[float]}, ...]
+    """
     if not settings.FACE_ANALYZER_URL:
         logger.info("FACE_ANALYZER_URL is not configured; skipping analysis request")
         return False
@@ -36,6 +43,7 @@ async def request_face_analysis(
         "s3_key": s3_key,
         "s3_url": s3_url,
         "callback_url": callback_url,
+        "known_actors": known_actors or [],
     }
     headers = {}
     if settings.FACE_ANALYZER_SECRET:
