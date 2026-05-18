@@ -1,7 +1,7 @@
 """
 video.py
 ────────
-영상 업로드 (S3 multipart) 및 face-analysis 트리거.
+영상 업로드 (S3 multipart) 및 face-analysis 트리거/콜백.
 
 업로드 흐름:
   1) POST .../video/upload/init       → upload_id + s3_key 발급
@@ -9,6 +9,12 @@ video.py
      (PWA가 이 URL들로 S3에 직접 PUT, 서버는 바이트를 보지 않음)
   3) POST .../video/upload/complete   → S3 조립 + Video row 업데이트 + analyzer 트리거
   실패/취소 시: POST .../video/upload/abort
+
+분석 콜백:
+  POST /videos/analysis-callback
+  - matched[]: analyzer가 known_actors 중 매칭한 항목 → VideoActor 링크만 추가
+  - new_candidates[]: 새 얼굴 → Actor INSERT (name="배우 {actor_id}") + 링크
+  - analysis_result.appearances[]: "new:{idx}" placeholder → "actor:{id}" 치환
 """
 
 import json
@@ -20,7 +26,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import delete, select, text
 
 from app.core.database import get_db
 from app.core.config import settings
@@ -32,7 +38,7 @@ from app.core.s3 import (
     generate_part_upload_url,
     s3_object_url,
 )
-from app.models.models import Video, Session
+from app.models.models import Actor, Session, Video, VideoActor
 
 router = APIRouter(prefix="/sessions/{session_id}/video", tags=["video"])
 analysis_router = APIRouter(prefix="/videos", tags=["video"])
@@ -44,11 +50,35 @@ ALLOWED_MIME = {
 }
 
 
-class AnalysisCallbackPayload(BaseModel):
-    video_id: int
-    analysis_status: str
-    analysis_result: dict[str, Any] | list[Any] | str | None = None
-    error_message: str | None = None
+# ─────────────────────────────────────────────────────────────────────────────
+# 공용 헬퍼
+# ─────────────────────────────────────────────────────────────────────────────
+
+async def _load_known_actors(db: AsyncSession, project_id: int) -> list[dict[str, Any]]:
+    """project의 모든 actor + embedding을 analyzer payload 형태로 변환"""
+    result = await db.execute(
+        select(Actor).where(Actor.project_id == project_id, Actor.face_embedding.isnot(None))
+    )
+    actors = result.scalars().all()
+    return [
+        {"actor_id": a.actor_id, "embedding": list(a.face_embedding)}
+        for a in actors
+    ]
+
+
+async def _project_id_for_video(db: AsyncSession, video: Video) -> int | None:
+    result = await db.execute(select(Session).where(Session.session_id == video.session_id))
+    sess = result.scalar_one_or_none()
+    return sess.project_id if sess else None
+
+
+def _build_actor_response(actor: Actor, is_new: bool) -> dict[str, Any]:
+    return {
+        "actor_id": actor.actor_id,
+        "name": actor.name or f"배우 {actor.actor_id}",
+        "thumbnail_url": s3_object_url(actor.thumbnail_s3_key) if actor.thumbnail_s3_key else None,
+        "is_new": is_new,
+    }
 
 
 def _decode_analysis_result(raw_result: str | None) -> Any:
@@ -58,6 +88,31 @@ def _decode_analysis_result(raw_result: str | None) -> Any:
         return json.loads(raw_result)
     except json.JSONDecodeError:
         return raw_result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Callback schema
+# ─────────────────────────────────────────────────────────────────────────────
+
+class MatchedActor(BaseModel):
+    actor_id: int
+    thumbnail_s3_key: str | None = None  # analyzer가 새로 찍은 키 (참고용, 저장 안 함)
+    similarity: float | None = None
+
+
+class NewCandidate(BaseModel):
+    temp_index: int
+    thumbnail_s3_key: str
+    face_embedding: list[float]
+
+
+class AnalysisCallbackPayload(BaseModel):
+    video_id: int
+    analysis_status: str
+    matched: list[MatchedActor] = []
+    new_candidates: list[NewCandidate] = []
+    analysis_result: dict[str, Any] | list[Any] | str | None = None
+    error_message: str | None = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -174,7 +229,6 @@ async def get_upload_part_urls(
     payload: PartUrlsRequest,
 ):
     """파트별 presigned PUT URL 발급. 클라이언트가 이 URL로 S3에 직접 PUT."""
-    # 한 번에 너무 많이 발급 못 하게 제한
     if len(payload.part_numbers) > settings.UPLOAD_MAX_PARTS:
         raise HTTPException(status_code=400, detail="요청 파트 수가 너무 많아요")
 
@@ -227,6 +281,11 @@ async def complete_video_upload(
     if sess:
         sess.in_progress = False
 
+    project_id = sess.project_id if sess else None
+    known_actors: list[dict[str, Any]] = []
+    if project_id is not None:
+        known_actors = await _load_known_actors(db, project_id)
+
     await db.flush()
     await db.commit()
 
@@ -236,6 +295,7 @@ async def complete_video_upload(
         session_id=session_id,
         s3_key=payload.s3_key,
         s3_url=s3_url,
+        known_actors=known_actors,
     )
 
     return {
@@ -277,17 +337,30 @@ async def get_video(
     session_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """세션의 영상 정보 조회"""
+    """세션의 영상 정보 + 영상에 등장한 actors 조회."""
     result = await db.execute(select(Video).where(Video.session_id == session_id))
     video = result.scalar_one_or_none()
     if not video:
         raise HTTPException(status_code=404, detail="영상을 찾을 수 없어요")
+
+    # 이 영상에 링크된 actors 조회 (is_new_in_video 포함)
+    link_result = await db.execute(
+        select(VideoActor, Actor)
+        .join(Actor, Actor.actor_id == VideoActor.actor_id)
+        .where(VideoActor.video_id == video.video_id)
+        .order_by(Actor.actor_id)
+    )
+    actors_payload = [
+        _build_actor_response(actor, link.is_new_in_video)
+        for link, actor in link_result.all()
+    ]
 
     return {
         "video_id": video.video_id,
         "s3_url": video.s3_url,
         "analysis_status": video.analysis_status,
         "analysis_result": _decode_analysis_result(video.analysis_result),
+        "actors": actors_payload,
     }
 
 
@@ -297,7 +370,7 @@ async def analyze_existing_video(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    """이미 업로드된 세션 영상을 외부 face-analyzer 서비스로 분석 요청."""
+    """이미 업로드된 영상을 재분석. 기존 VideoActor 링크는 삭제 후 콜백에서 재구성."""
     result = await db.execute(select(Video).where(Video.session_id == session_id))
     video = result.scalar_one_or_none()
     if not video:
@@ -305,8 +378,17 @@ async def analyze_existing_video(
     if not video.s3_key or not video.s3_url:
         raise HTTPException(status_code=400, detail="분석할 S3 영상 정보가 없어요")
 
+    # 재분석 시 기존 링크 삭제 (콜백에서 재구성)
+    await db.execute(delete(VideoActor).where(VideoActor.video_id == video.video_id))
+
     video.analysis_status = "pending"
     video.analysis_result = None
+
+    project_id = await _project_id_for_video(db, video)
+    known_actors: list[dict[str, Any]] = []
+    if project_id is not None:
+        known_actors = await _load_known_actors(db, project_id)
+
     await db.flush()
     await db.commit()
 
@@ -316,6 +398,7 @@ async def analyze_existing_video(
         session_id=session_id,
         s3_key=video.s3_key,
         s3_url=video.s3_url,
+        known_actors=known_actors,
     )
 
     return {
@@ -331,7 +414,13 @@ async def update_analysis_result(
     x_analyzer_secret: str | None = Header(default=None, alias="X-Analyzer-Secret"),
     db: AsyncSession = Depends(get_db),
 ):
-    """외부 face-analyzer 서비스가 분석 완료/실패 결과를 저장하는 callback."""
+    """analyzer 분석 완료/실패 결과 처리.
+
+    1. matched[] → VideoActor 링크만 추가 (썸네일/임베딩 갱신 안 함, 결정 1·2)
+    2. new_candidates[] → Actor INSERT → flush로 actor_id 얻고 → name="배우 {id}"
+    3. analysis_result.appearances[]의 "new:{idx}" → "actor:{id}" 치환
+    4. 고아 actor (어떤 video에도 안 링크된 actor) 정리
+    """
     if settings.FACE_ANALYZER_SECRET and x_analyzer_secret != settings.FACE_ANALYZER_SECRET:
         raise HTTPException(status_code=401, detail="invalid analyzer secret")
 
@@ -343,13 +432,95 @@ async def update_analysis_result(
     if payload.analysis_status not in {"pending", "processing", "done", "failed"}:
         raise HTTPException(status_code=400, detail="invalid analysis_status")
 
-    video.analysis_status = payload.analysis_status
-    if payload.analysis_result is not None:
-        video.analysis_result = json.dumps(payload.analysis_result, ensure_ascii=False)
-    elif payload.error_message is not None:
-        video.analysis_result = json.dumps({"error_message": payload.error_message}, ensure_ascii=False)
+    project_id = await _project_id_for_video(db, video)
+
+    # 실패면 상태만 기록하고 종료 (링크 변경 없음)
+    if payload.analysis_status != "done":
+        video.analysis_status = payload.analysis_status
+        if payload.error_message:
+            video.analysis_result = json.dumps(
+                {"error_message": payload.error_message}, ensure_ascii=False
+            )
+        return {"video_id": video.video_id, "analysis_status": video.analysis_status}
+
+    if project_id is None:
+        raise HTTPException(status_code=400, detail="video에 연결된 project를 찾을 수 없어요")
+
+    # 1) matched: 기존 actor에 링크 추가 (이미 있으면 무시)
+    for m in payload.matched:
+        existing_actor = await db.execute(
+            select(Actor).where(Actor.actor_id == m.actor_id, Actor.project_id == project_id)
+        )
+        if existing_actor.scalar_one_or_none() is None:
+            # 다른 project의 actor_id를 보냈거나 삭제됨 → 스킵
+            continue
+        existing_link = await db.execute(
+            select(VideoActor).where(
+                VideoActor.video_id == video.video_id,
+                VideoActor.actor_id == m.actor_id,
+            )
+        )
+        if existing_link.scalar_one_or_none() is not None:
+            continue
+        db.add(VideoActor(
+            video_id=video.video_id,
+            actor_id=m.actor_id,
+            is_new_in_video=False,
+        ))
+
+    # 2) new_candidates: 새 Actor INSERT → 이름 자동 부여 → 링크
+    temp_to_actor_id: dict[int, int] = {}
+    for c in payload.new_candidates:
+        actor = Actor(
+            project_id=project_id,
+            name=None,
+            face_embedding=c.face_embedding,
+            thumbnail_s3_key=c.thumbnail_s3_key,
+        )
+        db.add(actor)
+        await db.flush()  # actor_id 확보
+        actor.name = f"배우 {actor.actor_id}"
+        temp_to_actor_id[c.temp_index] = actor.actor_id
+
+        db.add(VideoActor(
+            video_id=video.video_id,
+            actor_id=actor.actor_id,
+            is_new_in_video=True,
+        ))
+
+    # 3) analysis_result placeholder 치환
+    result_payload = payload.analysis_result
+    if isinstance(result_payload, dict):
+        appearances = result_payload.get("appearances")
+        if isinstance(appearances, list):
+            for ap in appearances:
+                pid = ap.get("person_id") if isinstance(ap, dict) else None
+                if isinstance(pid, str) and pid.startswith("new:"):
+                    try:
+                        idx = int(pid.split(":", 1)[1])
+                    except ValueError:
+                        continue
+                    if idx in temp_to_actor_id:
+                        ap["person_id"] = f"actor:{temp_to_actor_id[idx]}"
+
+    video.analysis_status = "done"
+    if result_payload is not None:
+        video.analysis_result = json.dumps(result_payload, ensure_ascii=False)
+
+    await db.flush()
+
+    # 4) 고아 actor 정리: 같은 project에서 어떤 video_actors에도 안 묶인 actor 삭제
+    await db.execute(text("""
+        DELETE FROM actors
+        WHERE project_id = :pid
+          AND actor_id NOT IN (SELECT DISTINCT actor_id FROM video_actors)
+    """), {"pid": project_id})
+
+    await db.commit()
 
     return {
         "video_id": video.video_id,
         "analysis_status": video.analysis_status,
+        "matched_count": len(payload.matched),
+        "new_actor_count": len(payload.new_candidates),
     }
