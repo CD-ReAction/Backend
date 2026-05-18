@@ -333,6 +333,9 @@
     if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
     recording = false;
     document.getElementById("recordBtn").className = "record-btn stopped";
+
+    fetch(`${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/stop`, 
+      { method: "POST" });
   }
 
   // ──────────────────────────────────────────────────────────────────
