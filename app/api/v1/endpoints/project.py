@@ -160,6 +160,7 @@ async def create_session(
     session = Session(
         project_id=project_id,
         title=body.title,
+        s_category=body.s_category,
         in_progress=True,
     )
     db.add(session)
