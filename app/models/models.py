@@ -6,6 +6,7 @@ from sqlalchemy import (
     Boolean, Column, DateTime, ForeignKey, Integer, String, Text, Float,
     UniqueConstraint, Enum
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -58,11 +59,36 @@ class Actor(Base):
 
     actor_id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.project_id"), nullable=False)
-    name = Column(String, nullable=False)
-    face_embedding = Column(Text, nullable=True)
+    # INSERT 시점엔 null → 직후 "배우 {actor_id}"로 UPDATE (사용자 수정 가능)
+    name = Column(String, nullable=True)
+    face_embedding = Column(ARRAY(Float), nullable=True)  # Postgres FLOAT8[]
+    thumbnail_s3_key = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     project = relationship("Project", back_populates="actors")
+    video_links = relationship("VideoActor", back_populates="actor", cascade="all, delete-orphan")
+
+class SessionCategory(str, enum.Enum):
+    CATEGORY_A = "장면별 연습"
+    CATEGORY_B = "워크쓰루"
+    CATEGORY_C = "런쓰루"
+    CATEGORY_D = "텐투텐"
+
+class VideoActor(Base):
+    """어느 영상에 어느 배우가 나왔는지 + 그 영상에서 처음 등장한 배우인지"""
+    __tablename__ = "video_actors"
+
+    video_actor_id = Column(Integer, primary_key=True, index=True)
+    video_id = Column(Integer, ForeignKey("videos.video_id", ondelete="CASCADE"), nullable=False)
+    actor_id = Column(Integer, ForeignKey("actors.actor_id", ondelete="CASCADE"), nullable=False)
+    is_new_in_video = Column(Boolean, default=False, nullable=False)
+
+    video = relationship("Video", back_populates="actor_links")
+    actor = relationship("Actor", back_populates="video_links")
+
+    __table_args__ = (
+        UniqueConstraint("video_id", "actor_id", name="uq_video_actor"),
+    )
 
 class SessionCategory(str, enum.Enum):
     CATEGORY_A = "장면별 연습"
@@ -98,6 +124,7 @@ class Video(Base):
     record_ended_at = Column(DateTime, nullable=True)
 
     session = relationship("Session", back_populates="video")
+    actor_links = relationship("VideoActor", back_populates="video", cascade="all, delete-orphan")
 
 
 class Feedback(Base):

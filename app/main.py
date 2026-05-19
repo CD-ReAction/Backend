@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import engine, Base
-from app.api.v1.endpoints import camera_session, video, feedback, project, auth
+from app.api.v1.endpoints import actor, camera_session, video, feedback, project, auth
 
 app = FastAPI(title="Re:Action API", version="1.0.0")
 
@@ -23,6 +23,7 @@ app.include_router(video.router, prefix=API_PREFIX)
 app.include_router(video.analysis_router, prefix=API_PREFIX)
 app.include_router(feedback.router, prefix=API_PREFIX)
 app.include_router(project.router, prefix=API_PREFIX)
+app.include_router(actor.router, prefix=API_PREFIX)
 
 
 @app.on_event("startup")
