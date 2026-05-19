@@ -68,6 +68,11 @@ class Actor(Base):
     project = relationship("Project", back_populates="actors")
     video_links = relationship("VideoActor", back_populates="actor", cascade="all, delete-orphan")
 
+class SessionCategory(str, enum.Enum):
+    CATEGORY_A = "장면별 연습"
+    CATEGORY_B = "워크쓰루"
+    CATEGORY_C = "런쓰루"
+    CATEGORY_D = "텐투텐"
 
 class VideoActor(Base):
     """어느 영상에 어느 배우가 나왔는지 + 그 영상에서 처음 등장한 배우인지"""

@@ -43,6 +43,7 @@ class SessionOut(BaseModel):
     session_id: int
     project_id: int
     title: Optional[str]
+    s_category: SessionCategory
     in_progress: bool  # True = 진행중, False = 진행 완료 (영상 업로드 완료 시 자동 False)
     created_at: str
 
