@@ -15,7 +15,7 @@
 2. `cd pwa && npx netlify deploy --prod`
 
 ### PWA 재배포 시점 (netlify)
-pwa 파일이 변경되었을 때
+pwa 파일이 변경되었을 때 ⭐️
 
 ```bash
 cd ~/Desktop/Re-action/pwa
@@ -102,7 +102,7 @@ CREATE TABLE IF NOT EXISTS video_actors (
 ## Face-Analyzer Contract (Phase 4)
 
 ### S3
-- **버킷**: `reaction-video.capstone` (region `ap-northeast-2`)
+- **버킷**: `reaction-video.capstone`-> `reaction-buck`  (region `ap-northeast-2`)
 - **썸네일 키 컨벤션**: `thumbnails/{video_id}/{actor_index}.jpg` (JPEG, 200~400px 정사각 권장)
 - analyzer 측에서 boto3로 직접 PUT (IAM user에 `thumbnails/*` write 권한 필요)
 
