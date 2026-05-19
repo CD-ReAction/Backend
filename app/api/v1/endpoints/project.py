@@ -167,6 +167,7 @@ async def create_session(
 
     return SessionOut(
         session_id=session.session_id,
+        s_category=session.s_category,
         project_id=session.project_id,
         title=session.title,
         in_progress=session.in_progress,
