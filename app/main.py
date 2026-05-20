@@ -7,9 +7,15 @@ from app.api.v1.endpoints import actor, camera_session, video, feedback, project
 app = FastAPI(title="Re:Action API", version="1.0.0")
 
 # CORS
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://frontend-eosin-phi-egjc1ejy18.vercel.app",
+        "https://reaction-camera-connection.netlify.app",
+        "http://localhost:5173",
+        "http://localhost:3000",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
