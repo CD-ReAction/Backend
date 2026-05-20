@@ -121,7 +121,9 @@ class MatchedActor(BaseModel):
 
 class NewCandidate(BaseModel):
     temp_index: int
-    thumbnail_s3_key: str
+    # analyzer가 S3 업로드 실패/미설정 시 None을 보낼 수 있어 nullable.
+    # DB 컬럼/응답 빌더도 None 안전.
+    thumbnail_s3_key: str | None = None
     # 다중 exemplar 갤러리 (analyzer가 within-video diversity 보장해서 5~10개 송신)
     face_embeddings: list[list[float]]
 
