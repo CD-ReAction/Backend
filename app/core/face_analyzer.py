@@ -21,12 +21,16 @@ async def request_face_analysis(
     s3_key: str,
     s3_url: str,
     known_actors: list[dict[str, Any]] | None = None,
+    thumbnail_dir: str | None = None,
 ) -> bool:
     """외부 face-analyzer 서비스에 분석 요청.
 
     known_actors: 같은 프로젝트의 기존 배우 리스트 — analyzer가 ActorMatcher로
     유사도 비교 후 matched / new_candidates 로 분기해 콜백.
     형식: [{"actor_id": int, "embedding": list[float]}, ...]
+
+    thumbnail_dir: analyzer가 썸네일을 S3에 PUT할 디렉터리 (끝에 슬래시 포함).
+    예: "{project_id}/{session_id}/" → analyzer는 이 안에 "thumb-{idx}.jpg" 형식으로 저장.
     """
     if not settings.FACE_ANALYZER_URL:
         logger.info("FACE_ANALYZER_URL is not configured; skipping analysis request")
@@ -44,6 +48,7 @@ async def request_face_analysis(
         "s3_url": s3_url,
         "callback_url": callback_url,
         "known_actors": known_actors or [],
+        "thumbnail_dir": thumbnail_dir,
     }
     headers = {}
     if settings.FACE_ANALYZER_SECRET:
