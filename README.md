@@ -83,11 +83,17 @@ S3 콘솔 → 버킷 → Permissions → CORS 에 아래 정책 적용:
 Supabase SQL Editor에서 **한 번만** 실행:
 
 ```sql
--- Actor 모델 변경 (운영 데이터 없음 가정 — face_embedding 타입 변경 위해 DROP + ADD)
-ALTER TABLE actors DROP COLUMN IF EXISTS face_embedding;
-ALTER TABLE actors ADD COLUMN face_embedding FLOAT8[];
+-- Actor 모델 변경
 ALTER TABLE actors ADD COLUMN IF NOT EXISTS thumbnail_s3_key VARCHAR;
 ALTER TABLE actors ALTER COLUMN name DROP NOT NULL;
+
+-- 갤러리(다중 exemplar) 구조: face_embedding(FLOAT8[]) → face_embeddings(JSONB list[list[float]])
+ALTER TABLE actors ADD COLUMN IF NOT EXISTS face_embeddings JSONB;
+-- 기존 단일 임베딩이 있으면 [embedding] 형태로 wrap해서 옮김
+UPDATE actors
+SET face_embeddings = jsonb_build_array(to_jsonb(face_embedding))
+WHERE face_embedding IS NOT NULL AND face_embeddings IS NULL;
+ALTER TABLE actors DROP COLUMN IF EXISTS face_embedding;
 
 -- Video ↔ Actor 다대다 링크
 CREATE TABLE IF NOT EXISTS video_actors (
@@ -131,8 +137,14 @@ Headers: X-Analyzer-Secret: <env>
   "callback_url": "https://be.example/api/v1/videos/analysis-callback",
   "thumbnail_dir": "7/12/",                         // ⭐ Phase 5: analyzer는 이 안에만 PUT
   "known_actors": [                                 // 같은 project의 기존 actors
-    { "actor_id": 1, "embedding": [0.12, ...] },
-    { "actor_id": 2, "embedding": [0.34, ...] }
+    {
+      "actor_id": 1,
+      "face_templates": [                           // ⭐ 다중 exemplar (max-of-N 매칭)
+        [0.12, ...],
+        [0.08, ...]
+      ]
+    },
+    { "actor_id": 2, "face_templates": [[0.34, ...]] }
   ]
 }
 ```
@@ -146,14 +158,25 @@ Headers: X-Analyzer-Secret: <env>
   "analysis_status": "done",                 // "done" | "failed" | "processing"
 
   "matched": [                               // similarity >= 임계값 (analyzer가 판정)
-    { "actor_id": 2, "thumbnail_s3_key": "7/12/thumb-0.jpg", "similarity": 0.82 }
+    {
+      "actor_id": 2,
+      "thumbnail_s3_key": "7/12/thumb-0.jpg",
+      "similarity": 0.82,
+      "new_exemplars": [                     // ⭐ 이번 영상에서 새로 본 각도 (BE가 갤러리에 append)
+        [0.55, ...],
+        [0.61, ...]
+      ]
+    }
   ],
 
   "new_candidates": [                        // 새 얼굴
     {
       "temp_index": 0,
       "thumbnail_s3_key": "7/12/thumb-1.jpg",
-      "face_embedding": [0.56, ...]          // 512차원 권장 (ArcFace 등)
+      "face_embeddings": [                   // ⭐ 다중 exemplar 갤러리 (5~10개 권장, 512차원)
+        [0.56, ...],
+        [0.49, ...]
+      ]
     }
   ],
 
@@ -169,9 +192,13 @@ Headers: X-Analyzer-Secret: <env>
 ```
 
 ### 결정 사항 (Phase 4 설계)
-1. **임베딩/썸네일 고정** — 같은 actor가 재등장해도 첫 등장 값 유지 (BE는 matched에 대해 갱신 안 함)
+1. **갤러리 누적 정책** — actor당 `face_embeddings`는 다중 exemplar 리스트 (list[list[float]]).
+   - `new_candidates` 수신 시: `face_embeddings` 그대로 저장 (analyzer가 within-video diversity 보장)
+   - `matched` 수신 시: `new_exemplars`를 기존 갤러리에 append
+   - **Cap**: actor당 최대 20개 (`GALLERY_CAP_PER_ACTOR`). 초과 시 가장 오래된 것부터 drop
+   - 썸네일은 첫 등장 값 고정 (BE는 matched에 대해 갱신 안 함)
 2. **배우 작명** — `name = "배우 " || actor_id` (SERIAL 활용, INSERT 직후 UPDATE)
-3. **매칭 책임 분리** — analyzer가 cosine similarity 계산. BE는 결과만 받아 저장
+3. **매칭 책임 분리** — analyzer가 cosine similarity 계산 (각 actor 갤러리에 대해 max-of-N). BE는 결과만 받아 저장
 4. **재분석 시** — `POST /sessions/{id}/video/analyze`는 기존 VideoActor 링크를 모두 삭제 후 콜백에서 재구성. 콜백 끝에 고아 actor(=어떤 영상에도 안 묶인 actor) 정리
 5. **사용자 머지 (`POST /api/v1/actors/{a}/merge-into`)** — UNIQUE(video_id, actor_id) 충돌 시 A 링크 삭제, B의 `is_new_in_video`는 유지
 
