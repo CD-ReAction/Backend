@@ -91,10 +91,10 @@ class VideoActor(Base):
     )
 
 class SessionCategory(str, enum.Enum):
-    CATEGORY_A = "장면별 연습"
-    CATEGORY_B = "워크쓰루"
-    CATEGORY_C = "런쓰루"
-    CATEGORY_D = "텐투텐"
+    SCENE = "장면별 연습"
+    WORKTHROUGH = "워크쓰루"
+    RUNTHROUGH = "런쓰루"
+    TEN_TO_TEN = "텐투텐"
 
 class Session(Base):
     __tablename__ = "sessions"

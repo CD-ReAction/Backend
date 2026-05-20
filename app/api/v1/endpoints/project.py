@@ -175,7 +175,7 @@ async def create_session(
         created_at=session.created_at.isoformat(),
     )
 
-
+'''
 @router.get("/{project_id}/sessions", response_model=List[SessionOut])
 async def get_sessions(
     project_id: int,
@@ -192,6 +192,42 @@ async def get_sessions(
     return [
         SessionOut(
             session_id=s.session_id,
+            project_id=s.project_id,
+            title=s.title,
+            in_progress=s.in_progress,
+            created_at=s.created_at.isoformat(),
+        )
+        for s in sessions
+    ]
+'''
+
+
+@router.get("/{project_id}/sessions", response_model=List[SessionOut])
+async def list_sessions(
+    project_id: int,
+    category: Optional[SessionCategory] = Query(
+        None,
+        description="카테고리로 필터링 (선택). 미지정 시 전체 조회.",
+    ),
+    db: AsyncSession = Depends(get_db),
+):
+    """프로젝트의 세션 목록 조회 (카테고리 필터 가능)"""
+    stmt = (
+        select(Session)
+        .where(Session.project_id == project_id)
+        .order_by(Session.created_at.desc())
+    )
+    
+    if category is not None:
+        stmt = stmt.where(Session.s_category == category)
+    
+    result = await db.execute(stmt)
+    sessions = result.scalars().all()
+    
+    return [
+        SessionOut(
+            session_id=s.session_id,
+            s_category=s.s_category,
             project_id=s.project_id,
             title=s.title,
             in_progress=s.in_progress,
