@@ -1,9 +1,9 @@
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, Query
+from sqlalchemy import select
 
 from app.core.database import get_db
 from app.models.models import Project, ProjectMember, Session, SessionCategory
