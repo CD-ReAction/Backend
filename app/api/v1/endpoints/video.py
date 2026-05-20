@@ -188,8 +188,14 @@ async def init_video_upload(
             detail=f"파트 수가 {settings.UPLOAD_MAX_PARTS}개를 초과해요",
         )
 
+    # 프로젝트 단위 폴더로 묶기: {project_id}/{session_id}/video.{ext}
+    sess_row = await db.execute(select(Session).where(Session.session_id == session_id))
+    sess_obj = sess_row.scalar_one_or_none()
+    if not sess_obj:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
+
     ext = ALLOWED_MIME[payload.content_type]
-    s3_key = f"videos/{session_id}/{uuid.uuid4().hex}.{ext}"
+    s3_key = f"{sess_obj.project_id}/{session_id}/video.{ext}"
     upload_id = await create_multipart_upload(s3_key, payload.content_type)
 
     result = await db.execute(select(Video).where(Video.session_id == session_id))
@@ -232,7 +238,7 @@ async def get_upload_part_urls(
     if len(payload.part_numbers) > settings.UPLOAD_MAX_PARTS:
         raise HTTPException(status_code=400, detail="요청 파트 수가 너무 많아요")
 
-    if not payload.s3_key.startswith(f"videos/{session_id}/"):
+    if f"/{session_id}/video." not in payload.s3_key:
         raise HTTPException(status_code=400, detail="잘못된 s3_key")
 
     urls: dict[int, str] = {}
@@ -257,7 +263,7 @@ async def complete_video_upload(
     db: AsyncSession = Depends(get_db),
 ):
     """모든 파트 업로드 후 S3에 조립 요청. analyzer 트리거."""
-    if not payload.s3_key.startswith(f"videos/{session_id}/"):
+    if f"/{session_id}/video." not in payload.s3_key:
         raise HTTPException(status_code=400, detail="잘못된 s3_key")
 
     result = await db.execute(select(Video).where(Video.session_id == session_id))
@@ -296,6 +302,7 @@ async def complete_video_upload(
         s3_key=payload.s3_key,
         s3_url=s3_url,
         known_actors=known_actors,
+        thumbnail_dir=f"{project_id}/{session_id}/" if project_id is not None else None,
     )
 
     return {
@@ -312,7 +319,7 @@ async def abort_video_upload(
     db: AsyncSession = Depends(get_db),
 ):
     """업로드 취소. S3 조각 정리 + Video row 정리."""
-    if not payload.s3_key.startswith(f"videos/{session_id}/"):
+    if f"/{session_id}/video." not in payload.s3_key:
         raise HTTPException(status_code=400, detail="잘못된 s3_key")
 
     await abort_multipart_upload(payload.s3_key, payload.upload_id)
@@ -399,6 +406,7 @@ async def analyze_existing_video(
         s3_key=video.s3_key,
         s3_url=video.s3_url,
         known_actors=known_actors,
+        thumbnail_dir=f"{project_id}/{session_id}/" if project_id is not None else None,
     )
 
     return {

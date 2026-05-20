@@ -99,12 +99,25 @@ CREATE TABLE IF NOT EXISTS video_actors (
 );
 ```
 
-## Face-Analyzer Contract (Phase 4)
+## Face-Analyzer Contract (Phase 4 + 5)
 
-### S3
-- **버킷**: `reaction-video.capstone`-> `reaction-buck`  (region `ap-northeast-2`)
-- **썸네일 키 컨벤션**: `thumbnails/{video_id}/{actor_index}.jpg` (JPEG, 200~400px 정사각 권장)
-- analyzer 측에서 boto3로 직접 PUT (IAM user에 `thumbnails/*` write 권한 필요)
+### S3 폴더 구조 (Phase 5 — 프로젝트 단위로 묶음)
+```
+reaction-video.capstone/
+└── {project_id}/
+    └── {session_id}/
+        ├── video.{webm|mp4|mov}     ← BE가 multipart PUT (한 세션당 1개)
+        ├── thumb-0.jpg              ← analyzer가 PUT
+        ├── thumb-1.jpg
+        └── thumb-N.jpg
+```
+
+- **버킷**: `reaction-buck` (region `ap-northeast-2`)
+- **영상 키**: `{project_id}/{session_id}/video.{ext}` — BE가 생성 (재업로드 시 덮어씀)
+- **썸네일 키**: `{project_id}/{session_id}/thumb-{actor_index}.jpg` — analyzer가 PUT
+  - analyzer는 BE 호출 payload의 `thumbnail_dir` 값을 그대로 prefix로 사용 (하드코딩 X)
+  - 즉 `{thumbnail_dir}thumb-{idx}.jpg` 형태로 PUT
+- analyzer 측 IAM user 필요 권한: 같은 prefix 하위 `*` write
 
 ### BE → Analyzer 호출 payload
 ```jsonc
@@ -113,10 +126,11 @@ Headers: X-Analyzer-Secret: <env>
 {
   "video_id": 27,
   "session_id": 12,
-  "s3_key": "videos/12/abc.webm",
-  "s3_url": "https://.../videos/12/abc.webm",
+  "s3_key": "7/12/video.webm",                      // 영상 key (= {pid}/{sid}/video.ext)
+  "s3_url": "https://.../7/12/video.webm",
   "callback_url": "https://be.example/api/v1/videos/analysis-callback",
-  "known_actors": [                          // 같은 project의 기존 actors
+  "thumbnail_dir": "7/12/",                         // ⭐ Phase 5: analyzer는 이 안에만 PUT
+  "known_actors": [                                 // 같은 project의 기존 actors
     { "actor_id": 1, "embedding": [0.12, ...] },
     { "actor_id": 2, "embedding": [0.34, ...] }
   ]
@@ -132,13 +146,13 @@ Headers: X-Analyzer-Secret: <env>
   "analysis_status": "done",                 // "done" | "failed" | "processing"
 
   "matched": [                               // similarity >= 임계값 (analyzer가 판정)
-    { "actor_id": 2, "thumbnail_s3_key": "thumbnails/27/0.jpg", "similarity": 0.82 }
+    { "actor_id": 2, "thumbnail_s3_key": "7/12/thumb-0.jpg", "similarity": 0.82 }
   ],
 
   "new_candidates": [                        // 새 얼굴
     {
       "temp_index": 0,
-      "thumbnail_s3_key": "thumbnails/27/1.jpg",
+      "thumbnail_s3_key": "7/12/thumb-1.jpg",
       "face_embedding": [0.56, ...]          // 512차원 권장 (ArcFace 등)
     }
   ],
