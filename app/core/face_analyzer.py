@@ -27,7 +27,8 @@ async def request_face_analysis(
 
     known_actors: 같은 프로젝트의 기존 배우 리스트 — analyzer가 ActorMatcher로
     유사도 비교 후 matched / new_candidates 로 분기해 콜백.
-    형식: [{"actor_id": int, "embedding": list[float]}, ...]
+    형식: [{"actor_id": int, "face_templates": list[list[float]]}, ...]
+    (각 actor마다 다중 exemplar 갤러리. analyzer는 max-of-N 매칭.)
 
     thumbnail_dir: analyzer가 썸네일을 S3에 PUT할 디렉터리 (끝에 슬래시 포함).
     예: "{project_id}/{session_id}/" → analyzer는 이 안에 "thumb-{idx}.jpg" 형식으로 저장.

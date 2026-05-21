@@ -49,21 +49,38 @@ ALLOWED_MIME = {
     "video/webm": "webm",
 }
 
+# actor 갤러리 cap — 초과 시 oldest exemplar drop
+GALLERY_CAP_PER_ACTOR = 20
+
+
+def _cap_exemplars(exemplars: list[list[float]]) -> list[list[float]]:
+    """초과 시 가장 오래된(앞쪽) exemplar 제거. append 순서 = 시간 순."""
+    if len(exemplars) > GALLERY_CAP_PER_ACTOR:
+        return exemplars[-GALLERY_CAP_PER_ACTOR:]
+    return exemplars
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 공용 헬퍼
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def _load_known_actors(db: AsyncSession, project_id: int) -> list[dict[str, Any]]:
-    """project의 모든 actor + embedding을 analyzer payload 형태로 변환"""
+    """project의 모든 actor + 갤러리(다중 exemplar)를 analyzer payload 형태로 변환.
+
+    face_embeddings는 list[list[float]] — analyzer는 각 actor에 대해
+    여러 exemplar 중 가장 가까운 것을 매칭에 사용 (max-of-N).
+    """
     result = await db.execute(
-        select(Actor).where(Actor.project_id == project_id, Actor.face_embedding.isnot(None))
+        select(Actor).where(Actor.project_id == project_id, Actor.face_embeddings.isnot(None))
     )
     actors = result.scalars().all()
-    return [
-        {"actor_id": a.actor_id, "embedding": list(a.face_embedding)}
-        for a in actors
-    ]
+    payload: list[dict[str, Any]] = []
+    for a in actors:
+        templates = a.face_embeddings or []
+        if not templates:
+            continue
+        payload.append({"actor_id": a.actor_id, "face_templates": templates})
+    return payload
 
 
 async def _project_id_for_video(db: AsyncSession, video: Video) -> int | None:
@@ -98,12 +115,17 @@ class MatchedActor(BaseModel):
     actor_id: int
     thumbnail_s3_key: str | None = None  # analyzer가 새로 찍은 키 (참고용, 저장 안 함)
     similarity: float | None = None
+    # 이번 영상에서 새로 본 각도 — 기존 actor 갤러리에 누적
+    new_exemplars: list[list[float]] = []
 
 
 class NewCandidate(BaseModel):
     temp_index: int
-    thumbnail_s3_key: str
-    face_embedding: list[float]
+    # analyzer가 S3 업로드 실패/미설정 시 None을 보낼 수 있어 nullable.
+    # DB 컬럼/응답 빌더도 None 안전.
+    thumbnail_s3_key: str | None = None
+    # 다중 exemplar 갤러리 (analyzer가 within-video diversity 보장해서 5~10개 송신)
+    face_embeddings: list[list[float]]
 
 
 class AnalysisCallbackPayload(BaseModel):
@@ -454,14 +476,23 @@ async def update_analysis_result(
     if project_id is None:
         raise HTTPException(status_code=400, detail="video에 연결된 project를 찾을 수 없어요")
 
-    # 1) matched: 기존 actor에 링크 추가 (이미 있으면 무시)
+    # 1) matched: 기존 actor에 링크 추가 + 새 각도 exemplar 누적
     for m in payload.matched:
-        existing_actor = await db.execute(
+        actor_result = await db.execute(
             select(Actor).where(Actor.actor_id == m.actor_id, Actor.project_id == project_id)
         )
-        if existing_actor.scalar_one_or_none() is None:
+        actor = actor_result.scalar_one_or_none()
+        if actor is None:
             # 다른 project의 actor_id를 보냈거나 삭제됨 → 스킵
             continue
+
+        # 갤러리에 새 exemplar append (cap 초과 시 oldest drop).
+        # 링크가 이미 있는 경우(재분석 등)에도 갤러리는 갱신.
+        if m.new_exemplars:
+            actor.face_embeddings = _cap_exemplars(
+                list(actor.face_embeddings or []) + m.new_exemplars
+            )
+
         existing_link = await db.execute(
             select(VideoActor).where(
                 VideoActor.video_id == video.video_id,
@@ -482,7 +513,7 @@ async def update_analysis_result(
         actor = Actor(
             project_id=project_id,
             name=None,
-            face_embedding=c.face_embedding,
+            face_embeddings=_cap_exemplars(list(c.face_embeddings)),
             thumbnail_s3_key=c.thumbnail_s3_key,
         )
         db.add(actor)

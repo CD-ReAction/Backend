@@ -6,7 +6,7 @@ from sqlalchemy import (
     Boolean, Column, DateTime, ForeignKey, Integer, String, Text, Float,
     UniqueConstraint, Enum
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -61,7 +61,9 @@ class Actor(Base):
     project_id = Column(Integer, ForeignKey("projects.project_id"), nullable=False)
     # INSERT 시점엔 null → 직후 "배우 {actor_id}"로 UPDATE (사용자 수정 가능)
     name = Column(String, nullable=True)
-    face_embedding = Column(ARRAY(Float), nullable=True)  # Postgres FLOAT8[]
+    # 다중 exemplar 갤러리: list[list[float]] (각 inner list = 512-d ArcFace 임베딩)
+    # 매칭 성공한 영상마다 새 각도 exemplar이 append됨. cap은 콜백 핸들러에서 강제.
+    face_embeddings = Column(JSONB, nullable=True)
     thumbnail_s3_key = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
