@@ -36,6 +36,7 @@ from app.core.s3 import (
     complete_multipart_upload,
     create_multipart_upload,
     generate_part_upload_url,
+    generate_presigned_url,
     s3_object_url,
 )
 from app.models.models import Actor, Session, Video, VideoActor
@@ -384,9 +385,11 @@ async def get_video(
         for link, actor in link_result.all()
     ]
 
+    playback_url = generate_presigned_url(video.s3_key) if video.s3_key else None
+
     return {
         "video_id": video.video_id,
-        "s3_url": video.s3_url,
+        "s3_url": playback_url,
         "analysis_status": video.analysis_status,
         "analysis_result": _decode_analysis_result(video.analysis_result),
         "actors": actors_payload,
