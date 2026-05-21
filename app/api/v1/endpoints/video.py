@@ -37,7 +37,6 @@ from app.core.s3 import (
     create_multipart_upload,
     generate_part_upload_url,
     generate_presigned_url,
-    s3_object_url,
 )
 from app.models.models import Actor, Session, Video, VideoActor
 
@@ -94,7 +93,7 @@ def _build_actor_response(actor: Actor, is_new: bool) -> dict[str, Any]:
     return {
         "actor_id": actor.actor_id,
         "name": actor.name or f"배우 {actor.actor_id}",
-        "thumbnail_url": s3_object_url(actor.thumbnail_s3_key) if actor.thumbnail_s3_key else None,
+        "thumbnail_url": generate_presigned_url(actor.thumbnail_s3_key) if actor.thumbnail_s3_key else None,
         "is_new": is_new,
     }
 
