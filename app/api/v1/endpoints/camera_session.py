@@ -61,15 +61,12 @@ async def _get_session(session_id: str, db: AsyncSession) -> CameraSession:
     return s
 
 
-# ── 엔드포인트 ───────────────────────────────────────────
-
-@router.post("/create", response_model=CameraSessionResponse)
-async def create_camera_session(
+async def _create_new_session(
     db_session_id: int,
-    pwa_base_url: str = "https://reaction-camera-connection.netlify.app",
-    db: AsyncSession = Depends(get_db),
-):
-    """노트북에서 호출 — QR용 세션 생성 (status: yet)"""
+    pwa_base_url: str,
+    db: AsyncSession,
+) -> CameraSession:
+    """새 camera_session 생성"""
     session_id = secrets.token_urlsafe(12)
     code = _make_code()
     expires_at = datetime.utcnow() + timedelta(minutes=10)
@@ -77,7 +74,6 @@ async def create_camera_session(
         f"{pwa_base_url}/camera.html"
         f"?session={session_id}&code={code}&db_session={db_session_id}"
     )
-
     s = CameraSession(
         id=session_id,
         db_session_id=db_session_id,
@@ -89,13 +85,68 @@ async def create_camera_session(
     db.add(s)
     await db.flush()
     await db.commit()
+    return s
+
+
+# ── 엔드포인트 ───────────────────────────────────────────
+
+@router.post("/create", response_model=CameraSessionResponse)
+async def create_camera_session(
+    db_session_id: int,
+    pwa_base_url: str = "https://reaction-camera-connection.netlify.app",
+    db: AsyncSession = Depends(get_db),
+):
+    """노트북에서 호출 — QR용 세션 생성 (status: yet)"""
+    s = await _create_new_session(db_session_id, pwa_base_url, db)
+    return CameraSessionResponse(
+        session_id=s.id,
+        code=s.code,
+        camera_url=s.camera_url,
+        expires_at=s.expires_at.isoformat(),
+        db_session_id=s.db_session_id,
+    )
+
+
+@router.get("/by-db-session/{db_session_id}", response_model=CameraSessionResponse)
+async def get_or_create_camera_session(
+    db_session_id: int,
+    pwa_base_url: str = "https://reaction-camera-connection.netlify.app",
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    db_session_id로 활성 camera_session 조회.
+    없거나 만료됐으면 새로 생성.
+    
+    다인원 접속 동기화 핵심 엔드포인트:
+    - 여러 명이 같은 workspace에 입장해도 동일한 camera_session 반환
+    - 프론트에서 /create 대신 이 엔드포인트를 사용하면 됨
+    """
+    result = await db.execute(
+        select(CameraSession)
+        .where(
+            CameraSession.db_session_id == db_session_id,
+            CameraSession.status.notin_(["expired", "done"]),
+        )
+        .order_by(CameraSession.expires_at.desc())
+    )
+    existing = result.scalar_one_or_none()
+
+    # 만료 체크
+    if existing and datetime.utcnow() > existing.expires_at:
+        existing.status = "expired"
+        await db.commit()
+        existing = None
+
+    # 없으면 새로 생성
+    if not existing:
+        existing = await _create_new_session(db_session_id, pwa_base_url, db)
 
     return CameraSessionResponse(
-        session_id=session_id,
-        code=code,
-        camera_url=camera_url,
-        expires_at=expires_at.isoformat(),
-        db_session_id=db_session_id,
+        session_id=existing.id,
+        code=existing.code,
+        camera_url=existing.camera_url,
+        expires_at=existing.expires_at.isoformat(),
+        db_session_id=existing.db_session_id,
     )
 
 
@@ -107,7 +158,6 @@ async def get_camera_session_status(
     """노트북이 폴링 — 현재 상태 반환"""
     s = await _get_session(session_id, db)
 
-    # 만료 체크
     if s.status != "expired" and datetime.utcnow() > s.expires_at:
         s.status = "expired"
         await db.commit()
