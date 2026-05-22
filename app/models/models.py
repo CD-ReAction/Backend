@@ -113,6 +113,9 @@ class Session(Base):
     video = relationship("Video", back_populates="session", uselist=False)
     feedbacks = relationship("Feedback", back_populates="session")
 
+    rehearsal_started = Column(Boolean, default=False)
+    rehearsal_started_at = Column(DateTime, nullable=True)
+
 
 class Video(Base):
     __tablename__ = "videos"
