@@ -14,6 +14,9 @@ from sqlalchemy import select
 from app.core.database import get_db
 from app.models.models import Feedback
 
+from app.services.feedback_classify import classify_unclassified, classify_one
+
+
 router = APIRouter(prefix="/sessions/{session_id}/feedbacks", tags=["feedback"])
 
 
@@ -146,3 +149,23 @@ async def delete_feedback(
         raise HTTPException(status_code=404, detail="피드백을 찾을 수 없어요")
 
     await db.delete(feedback)
+
+
+
+@router.post("/classify")
+async def classify_session_feedbacks(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """이 세션의 미분류 피드백을 일괄 분류"""
+    return await classify_unclassified(db, session_id=session_id, limit=50)
+
+
+@router.post("/{feedback_id}/classify")
+async def classify_single(
+    session_id: int,
+    feedback_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """단일 피드백 분류 (재분류 가능)"""
+    return await classify_one(db, feedback_id)
