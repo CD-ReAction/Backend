@@ -139,6 +139,28 @@ class Feedback(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("Session", back_populates="feedbacks")
+    tags = relationship(  # ← 이 줄만 추가
+        "FeedbackTag",
+        back_populates="feedback",
+        cascade="all, delete-orphan",
+    )
+
+class FeedbackTag(Base):
+    """피드백 AI 분류 결과 태그 (1 피드백 : N 태그)"""
+    __tablename__ = "feedback_tags"
+
+    tag_id = Column(Integer, primary_key=True, index=True)
+    feedback_id = Column(
+        Integer,
+        ForeignKey("feedbacks.feedback_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    tag_type = Column(String, nullable=False)   # 'priority' | 'category'
+    tag_value = Column(String, nullable=False)  # 'required' | 'acting:tone'
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    feedback = relationship("Feedback", back_populates="tags")
 
 class CameraSession(Base): #camera-connection
     __tablename__ = "camera_sessions"
