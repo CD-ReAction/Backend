@@ -29,6 +29,7 @@ class Settings(BaseSettings):
 
     ANALYZER_SECRET: str = ""
     CALLBACK_SECRET: str = ""
+    ANTHROPIC_API_KEY: str
 
     class Config:
         env_file = ".env"
