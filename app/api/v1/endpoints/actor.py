@@ -2,8 +2,9 @@
 actor.py
 ────────
 배우(Actor) 매핑 UI 액션:
-  - PATCH /actors/{id}            : 이름 수정
-  - POST  /actors/{id}/merge-into : A를 B로 합치기 (사용자가 "이 둘은 같은 사람" 판정)
+  - POST  /projects/{project_id}/actors : 프로젝트에 배우 수동 등록 (분석 전 사전 등록용)
+  - PATCH /actors/{id}                   : 이름 수정
+  - POST  /actors/{id}/merge-into        : A를 B로 합치기 (사용자가 "이 둘은 같은 사람" 판정)
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -12,9 +13,14 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models.models import Actor
+from app.models.models import Actor, Project
 
 router = APIRouter(prefix="/actors", tags=["actors"])
+project_router = APIRouter(prefix="/projects", tags=["actors"])
+
+
+class ActorCreateRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
 
 
 class ActorRenameRequest(BaseModel):
@@ -23,6 +29,36 @@ class ActorRenameRequest(BaseModel):
 
 class ActorMergeRequest(BaseModel):
     target_actor_id: int
+
+
+@project_router.post("/{project_id}/actors", status_code=201)
+async def create_actor(
+    project_id: int,
+    body: ActorCreateRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """프로젝트에 배우 수동 등록.
+
+    face_embeddings/thumbnail 없는 placeholder로 생성. 영상 분석 매칭에는 사용되지 않고,
+    프론트에서 actor_id를 사전에 알고 쓰기 위한 용도.
+    """
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없어요")
+
+    actor = Actor(
+        project_id=project_id,
+        name=body.name.strip(),
+    )
+    db.add(actor)
+    await db.flush()
+    await db.commit()
+
+    return {
+        "actor_id": actor.actor_id,
+        "project_id": actor.project_id,
+        "name": actor.name,
+    }
 
 
 @router.patch("/{actor_id}")
