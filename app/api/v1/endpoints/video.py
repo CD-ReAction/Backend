@@ -555,10 +555,12 @@ async def update_analysis_result(
 
     await db.flush()
 
-    # 4) 고아 actor 정리: 같은 project에서 어떤 video_actors에도 안 묶인 actor 삭제
+    # 4) 고아 actor 정리: 분석에서 만들어졌다가 어떤 video_actors에도 안 묶인 actor만 삭제.
+    # face_embeddings가 NULL인 placeholder(수동 등록)는 보존.
     await db.execute(text("""
         DELETE FROM actors
         WHERE project_id = :pid
+          AND face_embeddings IS NOT NULL
           AND actor_id NOT IN (SELECT DISTINCT actor_id FROM video_actors)
     """), {"pid": project_id})
 
