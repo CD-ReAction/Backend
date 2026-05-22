@@ -235,3 +235,42 @@ async def list_sessions(
         )
         for s in sessions
     ]
+
+
+@router.post("/{session_id}/rehearsal/start")
+async def start_rehearsal(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Session).where(Session.session_id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
+
+    if not session.rehearsal_started:
+        session.rehearsal_started = True
+        session.rehearsal_started_at = datetime.utcnow()
+        await db.commit()
+
+    return {
+        "db_session_id": session_id,
+        "started": session.rehearsal_started,
+        "started_at": session.rehearsal_started_at.isoformat() if session.rehearsal_started_at else None,
+    }
+
+
+@router.get("/{session_id}/rehearsal/status")
+async def get_rehearsal_status(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(Session).where(Session.session_id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
+
+    return {
+        "db_session_id": session_id,
+        "started": session.rehearsal_started or False,
+        "started_at": session.rehearsal_started_at.isoformat() if session.rehearsal_started_at else None,
+    }
