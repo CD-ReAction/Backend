@@ -2,12 +2,12 @@ import os, json, re, logging
 from pathlib import Path
 from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
+from app.core.config import settings
 
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# async 클라이언트 (FastAPI async 환경에 맞춤)
-client = AsyncAnthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
 
 SYSTEM_PROMPT = (
     Path(__file__).parent.parent / "prompts" / "feedback_classifier.txt"
