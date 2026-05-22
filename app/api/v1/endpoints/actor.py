@@ -61,6 +61,34 @@ async def create_actor(
     }
 
 
+@project_router.get("/{project_id}/actors")
+async def list_project_actors(
+    project_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """프로젝트에 속한 배우 목록 조회 (피드백 작성 시 태그 후보로 사용)"""
+    project = await db.get(Project, project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="프로젝트를 찾을 수 없어요")
+
+    result = await db.execute(
+        select(Actor)
+        .where(Actor.project_id == project_id)
+        .order_by(Actor.actor_id)
+    )
+    actors = result.scalars().all()
+
+    return [
+        {
+            "actor_id": a.actor_id,
+            "project_id": a.project_id,
+            "name": a.name,
+            "thumbnail_s3_key": a.thumbnail_s3_key,
+        }
+        for a in actors
+    ]
+
+
 @router.patch("/{actor_id}")
 async def rename_actor(
     actor_id: int,
