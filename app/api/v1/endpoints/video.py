@@ -113,7 +113,8 @@ def _decode_analysis_result(raw_result: str | None) -> Any:
 
 class MatchedActor(BaseModel):
     actor_id: int
-    thumbnail_s3_key: str | None = None  # analyzer가 새로 찍은 키 (참고용, 저장 안 함)
+    # analyzer가 이번 영상에서 새로 찍은 썸네일 키 — Actor.thumbnail_s3_key를 최신으로 덮어씀
+    thumbnail_s3_key: str | None = None
     similarity: float | None = None
     # 이번 영상에서 새로 본 각도 — 기존 actor 갤러리에 누적
     new_exemplars: list[list[float]] = []
@@ -494,6 +495,10 @@ async def update_analysis_result(
             actor.face_embeddings = _cap_exemplars(
                 list(actor.face_embeddings or []) + m.new_exemplars
             )
+
+        # 매칭 성공 시 썸네일도 이번 영상에서 찍힌 것으로 갱신
+        if m.thumbnail_s3_key:
+            actor.thumbnail_s3_key = m.thumbnail_s3_key
 
         existing_link = await db.execute(
             select(VideoActor).where(
