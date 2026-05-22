@@ -69,12 +69,9 @@ class Actor(Base):
 
     project = relationship("Project", back_populates="actors")
     video_links = relationship("VideoActor", back_populates="actor", cascade="all, delete-orphan")
-
-class SessionCategory(str, enum.Enum):
-    CATEGORY_A = "장면별 연습"
-    CATEGORY_B = "워크쓰루"
-    CATEGORY_C = "런쓰루"
-    CATEGORY_D = "텐투텐"
+    feedback_mentions = relationship(
+        "FeedbackActorMention", back_populates="actor", cascade="all, delete-orphan"
+    )
 
 class VideoActor(Base):
     """어느 영상에 어느 배우가 나왔는지 + 그 영상에서 처음 등장한 배우인지"""
@@ -139,11 +136,22 @@ class Feedback(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("Session", back_populates="feedbacks")
+    actor_mentions = relationship(
+        "FeedbackActorMention", back_populates="feedback", cascade="all, delete-orphan"
+    )
     tags = relationship(  # ← 이 줄만 추가
         "FeedbackTag",
         back_populates="feedback",
         cascade="all, delete-orphan",
     )
+
+
+class FeedbackActorMention(Base):
+    """피드백 ↔ 배우 다:다 — 한 피드백이 여러 배우를 mention할 수 있음"""
+    __tablename__ = "feedback_actor_mentions"
+
+    feedback_actor_mention_id = Column(Integer, primary_key=True, index=True)
+
 
 class FeedbackTag(Base):
     """피드백 AI 분류 결과 태그 (1 피드백 : N 태그)"""
@@ -161,6 +169,19 @@ class FeedbackTag(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     feedback = relationship("Feedback", back_populates="tags")
+    actor_id = Column(
+        Integer,
+        ForeignKey("actors.actor_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+
+    feedback = relationship("Feedback", back_populates="actor_mentions")
+    actor = relationship("Actor", back_populates="feedback_mentions")
+
+    __table_args__ = (
+        UniqueConstraint("feedback_id", "actor_id", name="uq_feedback_actor_mention"),
+    )
+
 
 class CameraSession(Base): #camera-connection
     __tablename__ = "camera_sessions"
