@@ -6,13 +6,13 @@ feedback.py
 
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.models.models import Feedback, FeedbackTag
+from app.models.models import Actor, Feedback, FeedbackActor, FeedbackTag
 
 from app.services.feedback_classify import classify_unclassified, classify_one
 
@@ -25,11 +25,13 @@ router = APIRouter(prefix="/sessions/{session_id}/feedbacks", tags=["feedback"])
 class FeedbackCreate(BaseModel):
     content: str
     video_offset_seconds: Optional[float] = None
+    actor_ids: List[int] = []   # 피드백 대상 배우(여러 명 가능)
 
 
 class FeedbackUpdate(BaseModel):
     content: Optional[str] = None
     video_offset_seconds: Optional[float] = None
+    actor_ids: Optional[List[int]] = None   # 지정 시 전체 교체
 
 
 class FeedbackOut(BaseModel):
@@ -37,6 +39,7 @@ class FeedbackOut(BaseModel):
     session_id: int
     content: str
     video_offset_seconds: Optional[float]
+    actor_ids: List[int]
     created_at: str
 
     class Config:
@@ -48,6 +51,7 @@ class FeedbackWithTags(BaseModel):
     session_id: int
     content: str
     video_offset_seconds: Optional[float]
+    actor_ids: List[int]
     created_at: str
     priority: List[str]      # 예: ["required"] 또는 ["praise", "discussion"]
     categories: List[str]    # 예: ["acting:tone", "acting:expression"]
@@ -61,7 +65,7 @@ async def create_feedback(
     body: FeedbackCreate,
     db: AsyncSession = Depends(get_db),
 ):
-    """피드백 작성 (영상 촬영 중 실시간 작성 가능)"""
+    """피드백 작성 (영상 촬영 중 실시간 작성 가능). actor_ids로 대상 배우 여러 명 지정 가능"""
     feedback = Feedback(
         session_id=session_id,
         content=body.content,
@@ -70,11 +74,28 @@ async def create_feedback(
     db.add(feedback)
     await db.flush()
 
+    actor_ids = list(dict.fromkeys(body.actor_ids))  # 중복 제거, 순서 유지
+    if actor_ids:
+        res = await db.execute(
+            select(Actor.actor_id).where(Actor.actor_id.in_(actor_ids))
+        )
+        existing = {r[0] for r in res.all()}
+        missing = [aid for aid in actor_ids if aid not in existing]
+        if missing:
+            raise HTTPException(
+                status_code=400,
+                detail=f"존재하지 않는 배우: {missing}",
+            )
+        for aid in actor_ids:
+            db.add(FeedbackActor(feedback_id=feedback.feedback_id, actor_id=aid))
+        await db.flush()
+
     return FeedbackOut(
         feedback_id=feedback.feedback_id,
         session_id=feedback.session_id,
         content=feedback.content,
         video_offset_seconds=feedback.video_offset_seconds,
+        actor_ids=actor_ids,
         created_at=feedback.created_at.isoformat(),
     )
 
@@ -82,15 +103,25 @@ async def create_feedback(
 @router.get("", response_model=List[FeedbackOut])
 async def get_feedbacks(
     session_id: int,
+    actor_ids: List[int] = Query(default=[]),  # 여러 개 가능: ?actor_ids=1&actor_ids=2
     db: AsyncSession = Depends(get_db),
 ):
-    """세션의 모든 피드백 조회"""
-    result = await db.execute(
-        select(Feedback)
-        .where(Feedback.session_id == session_id)
-        .order_by(Feedback.created_at)
-    )
+    """세션의 피드백 조회. actor_ids 지정 시 해당 배우 중 한 명이라도 연결된 피드백만 (OR)"""
+    query = select(Feedback).where(Feedback.session_id == session_id)
+    if actor_ids:
+        sub = (
+            select(FeedbackActor.feedback_id)
+            .where(FeedbackActor.actor_id.in_(actor_ids))
+        )
+        query = query.where(Feedback.feedback_id.in_(sub))
+    query = query.order_by(Feedback.created_at)
+
+    result = await db.execute(query)
     feedbacks = result.scalars().all()
+    if not feedbacks:
+        return []
+
+    actors_by_feedback = await _load_actor_ids(db, [f.feedback_id for f in feedbacks])
 
     return [
         FeedbackOut(
@@ -98,6 +129,7 @@ async def get_feedbacks(
             session_id=f.session_id,
             content=f.content,
             video_offset_seconds=f.video_offset_seconds,
+            actor_ids=actors_by_feedback.get(f.feedback_id, []),
             created_at=f.created_at.isoformat(),
         )
         for f in feedbacks
@@ -107,33 +139,36 @@ async def get_feedbacks(
 @router.get("/with-tags", response_model=List[FeedbackWithTags])
 async def get_feedbacks_with_tags(
     session_id: int,
+    actor_ids: List[int] = Query(default=[]),
     db: AsyncSession = Depends(get_db),
 ):
-    """세션의 모든 피드백 + 태그 함께 조회 (프론트 목록용)"""
-    # 피드백 전부 가져오기
-    result = await db.execute(
-        select(Feedback)
-        .where(Feedback.session_id == session_id)
-        .order_by(Feedback.created_at)
-    )
-    feedbacks = result.scalars().all()
+    """세션의 피드백 + 태그 함께 조회 (프론트 목록용). actor_ids 지정 시 OR 필터"""
+    query = select(Feedback).where(Feedback.session_id == session_id)
+    if actor_ids:
+        sub = (
+            select(FeedbackActor.feedback_id)
+            .where(FeedbackActor.actor_id.in_(actor_ids))
+        )
+        query = query.where(Feedback.feedback_id.in_(sub))
+    query = query.order_by(Feedback.created_at)
 
+    result = await db.execute(query)
+    feedbacks = result.scalars().all()
     if not feedbacks:
         return []
 
-    # 이 세션 피드백들의 태그를 한 번에 가져오기 (N+1 방지)
     feedback_ids = [f.feedback_id for f in feedbacks]
     tag_result = await db.execute(
         select(FeedbackTag).where(FeedbackTag.feedback_id.in_(feedback_ids))
     )
     all_tags = tag_result.scalars().all()
 
-    # feedback_id별로 태그 묶기
     tags_by_feedback: dict[int, list] = {}
     for tag in all_tags:
         tags_by_feedback.setdefault(tag.feedback_id, []).append(tag)
 
-    # 응답 조립
+    actors_by_feedback = await _load_actor_ids(db, feedback_ids)
+
     output = []
     for fb in feedbacks:
         fb_tags = tags_by_feedback.get(fb.feedback_id, [])
@@ -142,25 +177,43 @@ async def get_feedbacks_with_tags(
             session_id=fb.session_id,
             content=fb.content,
             video_offset_seconds=fb.video_offset_seconds,
+            actor_ids=actors_by_feedback.get(fb.feedback_id, []),
             created_at=fb.created_at.isoformat(),
             priority=[t.tag_value for t in fb_tags if t.tag_type == "priority"],
             categories=[t.tag_value for t in fb_tags if t.tag_type == "category"],
         ))
     return output
 
+
+async def _load_actor_ids(
+    db: AsyncSession, feedback_ids: List[int]
+) -> dict[int, list[int]]:
+    """feedback_id 리스트에 매핑된 actor_id들을 한 번에 로드"""
+    if not feedback_ids:
+        return {}
+    res = await db.execute(
+        select(FeedbackActor.feedback_id, FeedbackActor.actor_id)
+        .where(FeedbackActor.feedback_id.in_(feedback_ids))
+    )
+    out: dict[int, list[int]] = {}
+    for fid, aid in res.all():
+        out.setdefault(fid, []).append(aid)
+    return out
+
 @router.get("/filter", response_model=List[FeedbackWithTags])
 async def filter_feedbacks(
     session_id: int,
     priority: Optional[str] = None,   # required | recommended | discussion | praise
     category: Optional[str] = None,   # 예: acting:tone, vocal:pitch
+    actor_ids: List[int] = Query(default=[]),  # 여러 배우 중 한 명이라도 연결된 피드백 (OR)
     db: AsyncSession = Depends(get_db),
 ):
     """
-    우선순위·카테고리로 피드백 필터링 (둘 다 선택적)
-    - priority만: 해당 우선순위 피드백
-    - category만: 해당 카테고리 피드백
-    - 둘 다: 두 조건 모두 만족하는 피드백 (AND)
-    - 둘 다 없음: 세션의 모든 피드백
+    우선순위·카테고리·배우로 피드백 필터링 (전부 선택적)
+    - priority/category 조건은 AND
+    - actor_ids는 그 중 한 명이라도 매칭되면 포함 (OR)
+    - 여러 조건 함께 지정 시 전부 만족해야 함 (AND across types)
+    - 아무 조건도 없으면: 세션의 모든 피드백
     """
     # ① 조건에 맞는 feedback_id 후보 수집
     matching_ids: Optional[set[int]] = None
@@ -181,16 +234,25 @@ async def filter_feedbacks(
             .where(FeedbackTag.tag_value == category)
         )
         category_ids = {r[0] for r in res.all()}
-        # priority도 있으면 교집합(AND), 아니면 그대로
         matching_ids = (
             matching_ids & category_ids if matching_ids is not None else category_ids
+        )
+
+    if actor_ids:
+        res = await db.execute(
+            select(FeedbackActor.feedback_id)
+            .where(FeedbackActor.actor_id.in_(actor_ids))
+        )
+        actor_match_ids = {r[0] for r in res.all()}
+        matching_ids = (
+            matching_ids & actor_match_ids if matching_ids is not None else actor_match_ids
         )
 
     # ② 피드백 조회
     query = select(Feedback).where(Feedback.session_id == session_id)
     if matching_ids is not None:
         if not matching_ids:
-            return []  # 조건 맞는 게 없음
+            return []
         query = query.where(Feedback.feedback_id.in_(matching_ids))
     query = query.order_by(Feedback.created_at)
 
@@ -199,7 +261,7 @@ async def filter_feedbacks(
     if not feedbacks:
         return []
 
-    # ③ 태그 붙여서 반환 (with-tags랑 동일 형식)
+    # ③ 태그·배우 붙여서 반환
     feedback_ids = [f.feedback_id for f in feedbacks]
     tag_result = await db.execute(
         select(FeedbackTag).where(FeedbackTag.feedback_id.in_(feedback_ids))
@@ -210,6 +272,8 @@ async def filter_feedbacks(
     for tag in all_tags:
         tags_by_feedback.setdefault(tag.feedback_id, []).append(tag)
 
+    actors_by_feedback = await _load_actor_ids(db, feedback_ids)
+
     output = []
     for fb in feedbacks:
         fb_tags = tags_by_feedback.get(fb.feedback_id, [])
@@ -218,6 +282,7 @@ async def filter_feedbacks(
             session_id=fb.session_id,
             content=fb.content,
             video_offset_seconds=fb.video_offset_seconds,
+            actor_ids=actors_by_feedback.get(fb.feedback_id, []),
             created_at=fb.created_at.isoformat(),
             priority=[t.tag_value for t in fb_tags if t.tag_type == "priority"],
             categories=[t.tag_value for t in fb_tags if t.tag_type == "category"],
@@ -231,7 +296,8 @@ async def update_feedback(
     body: FeedbackUpdate,
     db: AsyncSession = Depends(get_db),
 ):
-    """피드백 수정 (content / video_offset_seconds 부분 수정 가능)"""
+    """피드백 수정 (content / video_offset_seconds / actor_ids 부분 수정 가능).
+    actor_ids 지정 시 기존 연결을 전체 교체. 빈 리스트면 전부 해제."""
     result = await db.execute(
         select(Feedback).where(
             Feedback.feedback_id == feedback_id,
@@ -246,17 +312,47 @@ async def update_feedback(
     if not update_data:
         raise HTTPException(status_code=400, detail="수정할 내용이 없어요")
 
+    new_actor_ids = update_data.pop("actor_ids", None)
+
     for key, value in update_data.items():
         setattr(feedback, key, value)
 
+    if new_actor_ids is not None:
+        new_actor_ids = list(dict.fromkeys(new_actor_ids))
+        if new_actor_ids:
+            res = await db.execute(
+                select(Actor.actor_id).where(Actor.actor_id.in_(new_actor_ids))
+            )
+            existing = {r[0] for r in res.all()}
+            missing = [aid for aid in new_actor_ids if aid not in existing]
+            if missing:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"존재하지 않는 배우: {missing}",
+                )
+
+        # 기존 링크 전체 삭제 후 재삽입
+        cur = await db.execute(
+            select(FeedbackActor).where(FeedbackActor.feedback_id == feedback_id)
+        )
+        for link in cur.scalars().all():
+            await db.delete(link)
+        await db.flush()
+
+        for aid in new_actor_ids:
+            db.add(FeedbackActor(feedback_id=feedback_id, actor_id=aid))
+
     await db.flush()
     await db.refresh(feedback)
+
+    actors_by_feedback = await _load_actor_ids(db, [feedback_id])
 
     return FeedbackOut(
         feedback_id=feedback.feedback_id,
         session_id=feedback.session_id,
         content=feedback.content,
         video_offset_seconds=feedback.video_offset_seconds,
+        actor_ids=actors_by_feedback.get(feedback_id, []),
         created_at=feedback.created_at.isoformat(),
     )
 

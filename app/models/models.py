@@ -69,6 +69,7 @@ class Actor(Base):
 
     project = relationship("Project", back_populates="actors")
     video_links = relationship("VideoActor", back_populates="actor", cascade="all, delete-orphan")
+    feedback_links = relationship("FeedbackActor", back_populates="actor", cascade="all, delete-orphan")
 
 class SessionCategory(str, enum.Enum):
     CATEGORY_A = "장면별 연습"
@@ -143,6 +144,38 @@ class Feedback(Base):
         "FeedbackTag",
         back_populates="feedback",
         cascade="all, delete-orphan",
+    )
+    actor_links = relationship(
+        "FeedbackActor",
+        back_populates="feedback",
+        cascade="all, delete-orphan",
+    )
+
+
+class FeedbackActor(Base):
+    """피드백에 연결된 배우 (1 피드백 : N 배우)"""
+    __tablename__ = "feedback_actors"
+
+    feedback_actor_id = Column(Integer, primary_key=True, index=True)
+    feedback_id = Column(
+        Integer,
+        ForeignKey("feedbacks.feedback_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    actor_id = Column(
+        Integer,
+        ForeignKey("actors.actor_id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    feedback = relationship("Feedback", back_populates="actor_links")
+    actor = relationship("Actor", back_populates="feedback_links")
+
+    __table_args__ = (
+        UniqueConstraint("feedback_id", "actor_id", name="uq_feedback_actor"),
     )
 
 class FeedbackTag(Base):
