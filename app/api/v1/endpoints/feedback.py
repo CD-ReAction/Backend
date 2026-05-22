@@ -136,53 +136,55 @@ async def get_feedbacks(
     ]
 
 
-@router.get("/with-tags", response_model=List[FeedbackWithTags])
-async def get_feedbacks_with_tags(
-    session_id: int,
-    actor_ids: List[int] = Query(default=[]),
-    db: AsyncSession = Depends(get_db),
-):
-    """세션의 피드백 + 태그 함께 조회 (프론트 목록용). actor_ids 지정 시 OR 필터"""
-    query = select(Feedback).where(Feedback.session_id == session_id)
-    if actor_ids:
-        sub = (
-            select(FeedbackActor.feedback_id)
-            .where(FeedbackActor.actor_id.in_(actor_ids))
-        )
-        query = query.where(Feedback.feedback_id.in_(sub))
-    query = query.order_by(Feedback.created_at)
-
-    result = await db.execute(query)
-    feedbacks = result.scalars().all()
-    if not feedbacks:
-        return []
-
-    feedback_ids = [f.feedback_id for f in feedbacks]
-    tag_result = await db.execute(
-        select(FeedbackTag).where(FeedbackTag.feedback_id.in_(feedback_ids))
-    )
-    all_tags = tag_result.scalars().all()
-
-    tags_by_feedback: dict[int, list] = {}
-    for tag in all_tags:
-        tags_by_feedback.setdefault(tag.feedback_id, []).append(tag)
-
-    actors_by_feedback = await _load_actor_ids(db, feedback_ids)
-
-    output = []
-    for fb in feedbacks:
-        fb_tags = tags_by_feedback.get(fb.feedback_id, [])
-        output.append(FeedbackWithTags(
-            feedback_id=fb.feedback_id,
-            session_id=fb.session_id,
-            content=fb.content,
-            video_offset_seconds=fb.video_offset_seconds,
-            actor_ids=actors_by_feedback.get(fb.feedback_id, []),
-            created_at=fb.created_at.isoformat(),
-            priority=[t.tag_value for t in fb_tags if t.tag_type == "priority"],
-            categories=[t.tag_value for t in fb_tags if t.tag_type == "category"],
-        ))
-    return output
+# [DEPRECATED] /filter 가 동일 응답을 더 일반적인 필터로 제공하므로 비활성화.
+# 프론트 마이그레이션 완료 시 블록째 삭제.
+# @router.get("/with-tags", response_model=List[FeedbackWithTags])
+# async def get_feedbacks_with_tags(
+#     session_id: int,
+#     actor_ids: List[int] = Query(default=[]),
+#     db: AsyncSession = Depends(get_db),
+# ):
+#     """세션의 피드백 + 태그 함께 조회 (프론트 목록용). actor_ids 지정 시 OR 필터"""
+#     query = select(Feedback).where(Feedback.session_id == session_id)
+#     if actor_ids:
+#         sub = (
+#             select(FeedbackActor.feedback_id)
+#             .where(FeedbackActor.actor_id.in_(actor_ids))
+#         )
+#         query = query.where(Feedback.feedback_id.in_(sub))
+#     query = query.order_by(Feedback.created_at)
+#
+#     result = await db.execute(query)
+#     feedbacks = result.scalars().all()
+#     if not feedbacks:
+#         return []
+#
+#     feedback_ids = [f.feedback_id for f in feedbacks]
+#     tag_result = await db.execute(
+#         select(FeedbackTag).where(FeedbackTag.feedback_id.in_(feedback_ids))
+#     )
+#     all_tags = tag_result.scalars().all()
+#
+#     tags_by_feedback: dict[int, list] = {}
+#     for tag in all_tags:
+#         tags_by_feedback.setdefault(tag.feedback_id, []).append(tag)
+#
+#     actors_by_feedback = await _load_actor_ids(db, feedback_ids)
+#
+#     output = []
+#     for fb in feedbacks:
+#         fb_tags = tags_by_feedback.get(fb.feedback_id, [])
+#         output.append(FeedbackWithTags(
+#             feedback_id=fb.feedback_id,
+#             session_id=fb.session_id,
+#             content=fb.content,
+#             video_offset_seconds=fb.video_offset_seconds,
+#             actor_ids=actors_by_feedback.get(fb.feedback_id, []),
+#             created_at=fb.created_at.isoformat(),
+#             priority=[t.tag_value for t in fb_tags if t.tag_type == "priority"],
+#             categories=[t.tag_value for t in fb_tags if t.tag_type == "category"],
+#         ))
+#     return output
 
 
 async def _load_actor_ids(
