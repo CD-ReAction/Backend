@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.models.models import Feedback
+from app.models.models import Feedback, FeedbackTag
 
 from app.services.feedback_classify import classify_unclassified, classify_one
 
@@ -41,6 +41,16 @@ class FeedbackOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class FeedbackWithTags(BaseModel):
+    feedback_id: int
+    session_id: int
+    content: str
+    video_offset_seconds: Optional[float]
+    created_at: str
+    priority: List[str]      # 예: ["required"] 또는 ["praise", "discussion"]
+    categories: List[str]    # 예: ["acting:tone", "acting:expression"]
 
 
 # ── 엔드포인트 ───────────────────────────────────────────
@@ -92,6 +102,51 @@ async def get_feedbacks(
         )
         for f in feedbacks
     ]
+
+
+@router.get("/with-tags", response_model=List[FeedbackWithTags])
+async def get_feedbacks_with_tags(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """세션의 모든 피드백 + 태그 함께 조회 (프론트 목록용)"""
+    # 피드백 전부 가져오기
+    result = await db.execute(
+        select(Feedback)
+        .where(Feedback.session_id == session_id)
+        .order_by(Feedback.created_at)
+    )
+    feedbacks = result.scalars().all()
+
+    if not feedbacks:
+        return []
+
+    # 이 세션 피드백들의 태그를 한 번에 가져오기 (N+1 방지)
+    feedback_ids = [f.feedback_id for f in feedbacks]
+    tag_result = await db.execute(
+        select(FeedbackTag).where(FeedbackTag.feedback_id.in_(feedback_ids))
+    )
+    all_tags = tag_result.scalars().all()
+
+    # feedback_id별로 태그 묶기
+    tags_by_feedback: dict[int, list] = {}
+    for tag in all_tags:
+        tags_by_feedback.setdefault(tag.feedback_id, []).append(tag)
+
+    # 응답 조립
+    output = []
+    for fb in feedbacks:
+        fb_tags = tags_by_feedback.get(fb.feedback_id, [])
+        output.append(FeedbackWithTags(
+            feedback_id=fb.feedback_id,
+            session_id=fb.session_id,
+            content=fb.content,
+            video_offset_seconds=fb.video_offset_seconds,
+            created_at=fb.created_at.isoformat(),
+            priority=[t.tag_value for t in fb_tags if t.tag_type == "priority"],
+            categories=[t.tag_value for t in fb_tags if t.tag_type == "category"],
+        ))
+    return output
 
 
 @router.patch("/{feedback_id}", response_model=FeedbackOut)
@@ -169,3 +224,22 @@ async def classify_single(
 ):
     """단일 피드백 분류 (재분류 가능)"""
     return await classify_one(db, feedback_id)
+
+# ── 태그 포함 조회 엔드포인트 ──────────────────────────────
+
+@router.get("/{feedback_id}/tags")
+async def get_feedback_tags(
+    session_id: int,
+    feedback_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """단일 피드백의 태그만 조회"""
+    result = await db.execute(
+        select(FeedbackTag).where(FeedbackTag.feedback_id == feedback_id)
+    )
+    tags = result.scalars().all()
+    return {
+        "feedback_id": feedback_id,
+        "priority": [t.tag_value for t in tags if t.tag_type == "priority"],
+        "categories": [t.tag_value for t in tags if t.tag_type == "category"],
+    }
