@@ -145,6 +145,8 @@ class AnalysisCallbackPayload(BaseModel):
 class InitUploadRequest(BaseModel):
     content_type: str = Field(..., description="video/webm | video/mp4 | video/quicktime")
     file_size: int = Field(..., gt=0, description="전체 파일 크기(bytes)")
+    width: int | None = Field(default=None, gt=0, description="영상 가로 픽셀")
+    height: int | None = Field(default=None, gt=0, description="영상 세로 픽셀")
 
     @field_validator("content_type")
     @classmethod
@@ -221,6 +223,12 @@ async def init_video_upload(
     s3_key = f"{sess_obj.project_id}/{session_id}/video.{ext}"
     upload_id = await create_multipart_upload(s3_key, payload.content_type)
 
+    is_landscape = (
+        payload.width > payload.height
+        if payload.width is not None and payload.height is not None
+        else None
+    )
+
     result = await db.execute(select(Video).where(Video.session_id == session_id))
     video = result.scalar_one_or_none()
     if video:
@@ -230,6 +238,7 @@ async def init_video_upload(
         video.analysis_result = None
         video.record_started_at = video.record_started_at or datetime.utcnow()
         video.record_ended_at = None
+        video.is_landscape = is_landscape
     else:
         video = Video(
             session_id=session_id,
@@ -237,6 +246,7 @@ async def init_video_upload(
             s3_url=None,
             analysis_status="uploading",
             record_started_at=datetime.utcnow(),
+            is_landscape=is_landscape,
         )
         db.add(video)
 
@@ -393,6 +403,7 @@ async def get_video(
         "analysis_status": video.analysis_status,
         "analysis_result": _decode_analysis_result(video.analysis_result),
         "actors": actors_payload,
+        "is_landscape": video.is_landscape,
     }
 
 
