@@ -169,6 +169,71 @@
   let videoBlob = null;
   let currentMimeType = "";
   let pendingChunkWrites = 0;
+  let recordingPipeline = null;
+
+  // ──────────────────────────────────────────────────────────────────
+  // 폰이 세로면 캔버스로 90° 회전시켜서 항상 가로 픽셀로 녹화
+  // ──────────────────────────────────────────────────────────────────
+  function shouldRotateForRecording(srcStream) {
+    const orient = screen.orientation?.type || "";
+    if (orient.startsWith("portrait")) return true;
+    const track = srcStream.getVideoTracks()[0];
+    const { width, height } = track.getSettings();
+    if (width && height && height > width) return true;
+    return false;
+  }
+
+  function buildRecordingStream(srcStream) {
+    if (!shouldRotateForRecording(srcStream)) {
+      return { stream: srcStream, cleanup: () => {} };
+    }
+
+    const videoEl = document.createElement("video");
+    videoEl.srcObject = srcStream;
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+    videoEl.play().catch(() => {});
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 1920;
+    canvas.height = 1080;
+    const ctx = canvas.getContext("2d");
+
+    let sw = 0, sh = 0;
+    let stopped = false;
+
+    function tick() {
+      if (stopped) return;
+      if (videoEl.readyState >= 2) {
+        if (!sw && videoEl.videoWidth) {
+          sw = videoEl.videoWidth;
+          sh = videoEl.videoHeight;
+          canvas.width = sh;
+          canvas.height = sw;
+        }
+        if (sw && sh) {
+          ctx.save();
+          ctx.translate(canvas.width / 2, canvas.height / 2);
+          ctx.rotate(-Math.PI / 2);
+          ctx.drawImage(videoEl, -sw / 2, -sh / 2, sw, sh);
+          ctx.restore();
+        }
+      }
+      requestAnimationFrame(tick);
+    }
+    tick();
+
+    const canvasStream = canvas.captureStream(30);
+    srcStream.getAudioTracks().forEach(t => canvasStream.addTrack(t));
+
+    return {
+      stream: canvasStream,
+      cleanup: () => {
+        stopped = true;
+        videoEl.srcObject = null;
+      },
+    };
+  }
 
   // ──────────────────────────────────────────────────────────────────
   // MediaRecorder mimeType picker (VP9 → VP8 → MP4 H.264 → 기본)
@@ -348,11 +413,14 @@
     };
     if (currentMimeType) options.mimeType = currentMimeType;
 
+    recordingPipeline = buildRecordingStream(stream);
+    const recStream = recordingPipeline.stream;
+
     try {
-      mediaRecorder = new MediaRecorder(stream, options);
+      mediaRecorder = new MediaRecorder(recStream, options);
     } catch (e) {
       // 일부 기기는 bitrate 옵션을 거부 → fallback
-      mediaRecorder = new MediaRecorder(stream, currentMimeType ? { mimeType: currentMimeType } : undefined);
+      mediaRecorder = new MediaRecorder(recStream, currentMimeType ? { mimeType: currentMimeType } : undefined);
     }
 
     pendingChunkWrites = 0;
@@ -370,6 +438,10 @@
     mediaRecorder.onstop = async () => {
       // ondataavailable이 비동기라 IDB 쓰기 끝날 때까지 대기
       while (pendingChunkWrites > 0) await new Promise(r => setTimeout(r, 50));
+      if (recordingPipeline) {
+        recordingPipeline.cleanup();
+        recordingPipeline = null;
+      }
       const stored = await idbGetChunks(String(DB_SESSION_ID));
       const type = baseMime(stored[0]?.mimeType || currentMimeType);
       videoBlob = new Blob(stored.map(c => c.blob), { type });
