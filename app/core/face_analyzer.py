@@ -33,8 +33,11 @@ async def request_face_analysis(
     thumbnail_dir: analyzer가 썸네일을 S3에 PUT할 디렉터리 (끝에 슬래시 포함).
     예: "{project_id}/{session_id}/" → analyzer는 이 안에 "thumb-{idx}.jpg" 형식으로 저장.
     """
-    if not settings.FACE_ANALYZER_URL:
-        logger.info("FACE_ANALYZER_URL is not configured; skipping analysis request")
+    if not settings.RUNPOD_ENDPOINT_URL:
+        logger.info("RUNPOD_ENDPOINT_URL is not configured; skipping analysis request")
+        return False
+    if not settings.RUNPOD_API_KEY:
+        logger.warning("RUNPOD_API_KEY is not configured; skipping analysis request")
         return False
 
     callback_url = _callback_url()
@@ -43,22 +46,26 @@ async def request_face_analysis(
         return False
 
     payload = {
-        "video_id": video_id,
-        "session_id": session_id,
-        "s3_key": s3_key,
-        "s3_url": s3_url,
-        "callback_url": callback_url,
-        "known_actors": known_actors or [],
-        "thumbnail_dir": thumbnail_dir,
+        "input": {
+            "video_id": video_id,
+            "session_id": session_id,
+            "s3_key": s3_key,
+            "s3_url": s3_url,
+            "callback_url": callback_url,
+            "known_actors": known_actors or [],
+            "thumbnail_dir": thumbnail_dir,
+        }
     }
-    headers = {}
-    if settings.FACE_ANALYZER_SECRET:
-        headers["X-Analyzer-Secret"] = settings.FACE_ANALYZER_SECRET
+    headers = {
+        "Authorization": f"Bearer {settings.RUNPOD_API_KEY}",
+        "Content-Type": "application/json",
+    }
 
-    analyze_url = f"{settings.FACE_ANALYZER_URL.rstrip('/')}/analyze"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(analyze_url, json=payload, headers=headers)
+            response = await client.post(
+                settings.RUNPOD_ENDPOINT_URL, json=payload, headers=headers
+            )
             response.raise_for_status()
     except httpx.HTTPError:
         logger.exception("Failed to request face analysis for video_id=%s", video_id)
