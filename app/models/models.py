@@ -128,6 +128,7 @@ class Video(Base):
     analysis_result = Column(Text, nullable=True)
     record_started_at = Column(DateTime, nullable=True)
     record_ended_at = Column(DateTime, nullable=True)
+    is_landscape = Column(Boolean, nullable=True)
 
     session = relationship("Session", back_populates="video")
     actor_links = relationship("VideoActor", back_populates="video", cascade="all, delete-orphan")
