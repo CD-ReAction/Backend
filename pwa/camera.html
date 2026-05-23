@@ -410,6 +410,27 @@
     document.getElementById("progress").style.display = "none";
   }
 
+  // 녹화된 blob에서 실제 인코딩된 픽셀 크기 읽기 (iOS rotation 함정 회피용)
+  async function getVideoDimensions(blob) {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(blob);
+      const v = document.createElement("video");
+      v.muted = true;
+      v.playsInline = true;
+      v.preload = "metadata";
+      v.onloadedmetadata = () => {
+        const dims = { width: v.videoWidth, height: v.videoHeight };
+        URL.revokeObjectURL(url);
+        resolve(dims);
+      };
+      v.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve({ width: 0, height: 0 });
+      };
+      v.src = url;
+    });
+  }
+
   async function putWithRetry(url, blob, maxAttempts = 4) {
     let attempt = 0;
     let lastErr;
@@ -445,13 +466,19 @@
 
     try {
       // 1) init
+      const { width: videoWidth, height: videoHeight } = await getVideoDimensions(videoBlob);
+      const initBody = {
+        content_type: contentType,
+        file_size: videoBlob.size,
+      };
+      if (videoWidth > 0 && videoHeight > 0) {
+        initBody.width = videoWidth;
+        initBody.height = videoHeight;
+      }
       const initRes = await fetch(`${apiBase}/upload/init`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          content_type: contentType,
-          file_size: videoBlob.size,
-        }),
+        body: JSON.stringify(initBody),
       });
       if (!initRes.ok) throw new Error(`init 실패 (${initRes.status})`);
       ({ upload_id: uploadId, s3_key: s3Key, part_size: partSize, part_count: partCount } = await initRes.json());
