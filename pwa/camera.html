@@ -295,6 +295,17 @@
         },
         audio: true,
       });
+
+      // 가로 강제: 트랙이 portrait면 사용자에게 회전 요청
+      const track = stream.getVideoTracks()[0];
+      const { width: tw, height: th } = track.getSettings();
+      if (tw && th && th > tw) {
+        stream.getTracks().forEach(t => t.stop());
+        stream = null;
+        setStatus("error", "디바이스를 가로로 돌린 뒤 새로고침해주세요");
+        return;
+      }
+
       document.getElementById("videoPreview").srcObject = stream;
       setStatus("ready", "촬영 버튼을 눌러 시작하세요");
 
