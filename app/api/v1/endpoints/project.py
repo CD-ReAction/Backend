@@ -7,8 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.models.models import Project, ProjectMember, Session, SessionCategory
-
+from app.models.models import Project, ProjectMember, Session, SessionCategory, ProjectLike
 
 
 
@@ -277,3 +276,44 @@ async def get_rehearsal_status(
         "started": session.rehearsal_started or False,
         "started_at": session.rehearsal_started_at.isoformat() if session.rehearsal_started_at else None,
     }
+
+
+# 좋아요 토글
+@router.post("/{project_id}/like")
+async def toggle_like(
+    project_id: int,
+    user_id: int = 1,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(ProjectLike).where(
+            ProjectLike.project_id == project_id,
+            ProjectLike.user_id == user_id,
+        )
+    )
+    existing = result.scalar_one_or_none()
+
+    if existing:
+        await db.delete(existing)
+        await db.commit()
+        return {"liked": False}
+    else:
+        db.add(ProjectLike(project_id=project_id, user_id=user_id))
+        await db.commit()
+        return {"liked": True}
+
+
+# 좋아요한 프로젝트 목록
+@router.get("/liked", response_model=List[ProjectOut])
+async def get_liked_projects(
+    user_id: int = 1,
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(
+        select(Project)
+        .join(ProjectLike, ProjectLike.project_id == Project.project_id)
+        .where(ProjectLike.user_id == user_id)
+        .order_by(ProjectLike.created_at.desc())
+    )
+    projects = result.scalars().all()
+    return [_project_to_out(p) for p in projects]

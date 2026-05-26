@@ -71,11 +71,6 @@ class Actor(Base):
     video_links = relationship("VideoActor", back_populates="actor", cascade="all, delete-orphan")
     feedback_links = relationship("FeedbackActor", back_populates="actor", cascade="all, delete-orphan")
 
-class SessionCategory(str, enum.Enum):
-    CATEGORY_A = "장면별 연습"
-    CATEGORY_B = "워크쓰루"
-    CATEGORY_C = "런쓰루"
-    CATEGORY_D = "텐투텐"
 
 class VideoActor(Base):
     """어느 영상에 어느 배우가 나왔는지 + 그 영상에서 처음 등장한 배우인지"""
@@ -210,3 +205,11 @@ class CameraSession(Base): #camera-connection
     expires_at = Column(DateTime, nullable=False)
     connected_at = Column(DateTime, nullable=True)
     video_url = Column(String, nullable=True)
+
+class ProjectLike(Base):
+    __tablename__ = "project_likes"
+
+    like_id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, nullable=False)
+    project_id = Column(Integer, ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
