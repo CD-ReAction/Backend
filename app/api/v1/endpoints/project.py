@@ -33,6 +33,8 @@ class ProjectOut(BaseModel):
 
 class JoinRequest(BaseModel):
     join_code: str
+    user_id: int  # 추가 (인증 후 토큰에서 자동으로 받을 예정)
+
 
 
 class SessionCreate(BaseModel):
@@ -66,10 +68,10 @@ def _project_to_out(p: Project) -> ProjectOut:
 @router.post("", response_model=ProjectOut, status_code=201)
 async def create_project(
     body: ProjectCreate,
+    user_id: int = 1,  # ← 추가
     db: AsyncSession = Depends(get_db),
 ):
     """프로젝트 생성 (사용자가 직접 join_code 지정)"""
-    user_id = 1  # TODO: 인증 후 실제 user_id 사용
 
     code = body.join_code.strip().upper()
 
@@ -97,9 +99,10 @@ async def create_project(
 
 
 @router.get("", response_model=List[ProjectOut])
-async def get_my_projects(db: AsyncSession = Depends(get_db)):
-    """내가 속한 프로젝트만 조회"""
-    user_id = 1  # TODO: 인증 후 실제 user_id 사용
+async def get_my_projects(
+    user_id: int = 1,  # ← 추가
+    db: AsyncSession = Depends(get_db)
+):
 
     result = await db.execute(
         select(Project)
@@ -116,8 +119,7 @@ async def join_project(
     body: JoinRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """join_code로 프로젝트 참여"""
-    user_id = 2  # TODO: 인증 후 실제 user_id 사용
+    user_id = body.user_id 
 
     code = body.join_code.strip().upper()
     if len(code) != 4:
