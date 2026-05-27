@@ -40,6 +40,6 @@ async def on_startup():
         await conn.run_sync(Base.metadata.create_all)
 
 
-@app.get("/health")
+@app.api_route("/health", methods=["GET", "HEAD"])
 def health():
     return {"status": "ok"}
