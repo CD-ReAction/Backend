@@ -2,9 +2,10 @@
 actor.py
 ────────
 배우(Actor) 매핑 UI 액션:
-  - POST  /projects/{project_id}/actors : 프로젝트에 배우 수동 등록 (분석 전 사전 등록용)
-  - PATCH /actors/{id}                   : 이름 수정
-  - POST  /actors/{id}/merge-into        : A를 B로 합치기 (사용자가 "이 둘은 같은 사람" 판정)
+  - POST   /projects/{project_id}/actors : 프로젝트에 배우 수동 등록 (분석 전 사전 등록용)
+  - PATCH  /actors/{id}                   : 이름 수정
+  - POST   /actors/{id}/merge-into        : A를 B로 합치기 (사용자가 "이 둘은 같은 사람" 판정)
+  - DELETE /actors/{id}                   : 노이즈로 잘못 잡힌 배우 제거 (매핑 화면에서 사용)
 """
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -167,3 +168,23 @@ async def merge_actor(
         "merged_from": actor_id,
         "merged_into": body.target_actor_id,
     }
+
+
+@router.delete("/{actor_id}")
+async def delete_actor(
+    actor_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """배우 삭제 (analyzer가 노이즈를 얼굴로 잡아 가짜 배우가 생긴 경우 매핑 화면에서 제거).
+
+    cascade로 VideoActor / FeedbackActor 링크도 함께 삭제됨.
+    다음 영상 분석에서 같은 얼굴이 다시 잡히면 새 Actor로 등록됨 (= 갤러리 초기화).
+    """
+    actor = await db.get(Actor, actor_id)
+    if not actor:
+        raise HTTPException(status_code=404, detail="배우를 찾을 수 없어요")
+
+    await db.delete(actor)
+    await db.commit()
+
+    return {"deleted_actor_id": actor_id}
