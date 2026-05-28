@@ -104,6 +104,7 @@ class Session(Base):
 
     session_id = Column(Integer, primary_key=True, index=True)
     project_id = Column(Integer, ForeignKey("projects.project_id"), nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False)
     title = Column(String, nullable=True)
     s_category = Column(Enum(SessionCategory), nullable=False)
     in_progress = Column(Boolean, default=False)
