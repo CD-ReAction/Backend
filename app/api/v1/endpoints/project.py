@@ -156,11 +156,13 @@ async def join_project(
 async def create_session(
     project_id: int,
     body: SessionCreate,
+    user_id: int = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """세션 생성"""
+    """세션 생성. user_id = 생성자 (매칭 화면 접근 권한자)."""
     session = Session(
         project_id=project_id,
+        created_by_user_id=user_id,
         title=body.title,
         s_category=body.s_category,
         in_progress=True,

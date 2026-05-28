@@ -8,13 +8,23 @@ actor.py
   - DELETE /actors/{id}                   : 노이즈로 잘못 잡힌 배우 제거 (매핑 화면에서 사용)
 """
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models.models import Actor, Project
+from app.models.models import Actor, Project, Session
+
+
+async def _assert_session_creator(db: AsyncSession, session_id: int, user_id: int) -> None:
+    """매칭 화면에서 호출하는 액션은 세션 생성자만 허용."""
+    result = await db.execute(select(Session).where(Session.session_id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
+    if session.created_by_user_id != user_id:
+        raise HTTPException(status_code=403, detail="세션 생성자만 매칭을 수행할 수 있어요")
 
 router = APIRouter(prefix="/actors", tags=["actors"])
 project_router = APIRouter(prefix="/projects", tags=["actors"])
@@ -94,9 +104,13 @@ async def list_project_actors(
 async def rename_actor(
     actor_id: int,
     body: ActorRenameRequest,
+    session_id: int = Query(...),
+    user_id: int = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """배우 이름 수정 ('배우 5' → '이예나')"""
+    """배우 이름 수정 ('배우 5' → '이예나'). 매칭 화면 컨텍스트 세션의 생성자만 가능."""
+    await _assert_session_creator(db, session_id, user_id)
+
     result = await db.execute(select(Actor).where(Actor.actor_id == actor_id))
     actor = result.scalar_one_or_none()
     if not actor:
@@ -116,9 +130,11 @@ async def rename_actor(
 async def merge_actor(
     actor_id: int,
     body: ActorMergeRequest,
+    session_id: int = Query(...),
+    user_id: int = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """Actor A(actor_id)를 B(target_actor_id)로 합침.
+    """Actor A(actor_id)를 B(target_actor_id)로 합침. 매칭 화면 컨텍스트 세션의 생성자만 가능.
 
     처리 순서 (UNIQUE(video_id, actor_id) 충돌 회피):
       1. A의 VideoActor 중 B와 충돌 안 하는 것만 actor_id를 B로 UPDATE
@@ -127,6 +143,8 @@ async def merge_actor(
       2. A의 남은(=충돌해서 못 옮긴) VideoActor 행 전부 DELETE
       3. Actor A DELETE
     """
+    await _assert_session_creator(db, session_id, user_id)
+
     if actor_id == body.target_actor_id:
         raise HTTPException(status_code=400, detail="자기 자신으로는 merge할 수 없어요")
 

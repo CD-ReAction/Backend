@@ -23,7 +23,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import delete, select, text
@@ -375,9 +375,19 @@ async def abort_video_upload(
 @router.get("")
 async def get_video(
     session_id: int,
+    user_id: int = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """세션의 영상 정보 + 영상에 등장한 actors 조회."""
+    """세션의 영상 정보 + 영상에 등장한 actors 조회. 세션 생성자만 가능."""
+    session_result = await db.execute(
+        select(Session).where(Session.session_id == session_id)
+    )
+    session = session_result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
+    if session.created_by_user_id != user_id:
+        raise HTTPException(status_code=403, detail="세션 생성자만 매칭 화면을 볼 수 있어요")
+
     result = await db.execute(select(Video).where(Video.session_id == session_id))
     video = result.scalar_one_or_none()
     if not video:
