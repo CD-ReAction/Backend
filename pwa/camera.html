@@ -264,19 +264,77 @@
   // ──────────────────────────────────────────────────────────────────
   const IDB_NAME = "reaction-recordings";
   const IDB_STORE = "chunks";
+  const IDB_UPLOAD_STORE = "uploads"; // 진행 중인 multipart 업로드 상태
 
   function openIdb() {
     return new Promise((resolve, reject) => {
-      const req = indexedDB.open(IDB_NAME, 1);
+      const req = indexedDB.open(IDB_NAME, 2);
       req.onupgradeneeded = () => {
         const db = req.result;
         if (!db.objectStoreNames.contains(IDB_STORE)) {
           const store = db.createObjectStore(IDB_STORE, { keyPath: "id", autoIncrement: true });
           store.createIndex("sessionId", "sessionId", { unique: false });
         }
+        if (!db.objectStoreNames.contains(IDB_UPLOAD_STORE)) {
+          // keyPath = dbSessionId (string) — 세션당 진행 중 업로드 하나
+          db.createObjectStore(IDB_UPLOAD_STORE, { keyPath: "dbSessionId" });
+        }
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // 업로드 진행 상태 영속화 (재개용)
+  // ──────────────────────────────────────────────────────────────────
+  async function idbSaveUploadInit(dbSessionId, state) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_UPLOAD_STORE, "readwrite");
+      tx.objectStore(IDB_UPLOAD_STORE).put({ dbSessionId: String(dbSessionId), ...state });
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    });
+  }
+
+  // race-safe etag append: read-modify-write를 한 transaction 안에서
+  async function idbAddUploadEtag(dbSessionId, partNumber, etag) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_UPLOAD_STORE, "readwrite");
+      const store = tx.objectStore(IDB_UPLOAD_STORE);
+      const req = store.get(String(dbSessionId));
+      req.onsuccess = () => {
+        const state = req.result;
+        if (!state) { return; } // 이미 클리어됐으면 무시
+        if (!state.etags.some(e => e.part_number === partNumber)) {
+          state.etags.push({ part_number: partNumber, etag });
+          store.put(state);
+        }
+      };
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
+    });
+  }
+
+  async function idbGetUploadState(dbSessionId) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_UPLOAD_STORE, "readonly");
+      const req = tx.objectStore(IDB_UPLOAD_STORE).get(String(dbSessionId));
+      req.onsuccess = () => { db.close(); resolve(req.result || null); };
+      req.onerror = () => { db.close(); reject(req.error); };
+    });
+  }
+
+  async function idbClearUploadState(dbSessionId) {
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_UPLOAD_STORE, "readwrite");
+      tx.objectStore(IDB_UPLOAD_STORE).delete(String(dbSessionId));
+      tx.oncomplete = () => { db.close(); resolve(); };
+      tx.onerror = () => { db.close(); reject(tx.error); };
     });
   }
 
@@ -381,6 +439,7 @@
             setStatus("ready", "복구된 영상 — 업로드 버튼을 눌러주세요");
           } else {
             await idbClearChunks(String(DB_SESSION_ID));
+            await idbClearUploadState(DB_SESSION_ID).catch(() => {});
           }
         }
       } catch (err) {
@@ -401,8 +460,9 @@
 
   async function startRecord() {
     if (!stream) return;
-    // 새 녹화 시작 전 이전 청크 정리
+    // 새 녹화 시작 전 이전 청크 + 이전 업로드 진행 상태 정리
     try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
+    try { await idbClearUploadState(DB_SESSION_ID); } catch {}
     videoBlob = null;
     document.getElementById("uploadBtn").style.display = "none";
 
@@ -534,41 +594,75 @@
 
     const apiBase = `${CONFIG.API_BASE_URL}/api/v1/sessions/${DB_SESSION_ID}/video`;
     const contentType = baseMime(currentMimeType || videoBlob.type);
-    let uploadId, s3Key, partSize, partCount;
+    let uploadId, s3Key, partSize, partCount, resumed = false, completedEtags = [];
 
     try {
-      // 1) init
-      const { width: videoWidth, height: videoHeight } = await getVideoDimensions(videoBlob);
-      const initBody = {
-        content_type: contentType,
-        file_size: videoBlob.size,
-      };
-      if (videoWidth > 0 && videoHeight > 0) {
-        initBody.width = videoWidth;
-        initBody.height = videoHeight;
+      // 0) 이전 진행 상태가 있고 현재 blob과 매치되면 이어서, 아니면 새로 init
+      const saved = await idbGetUploadState(DB_SESSION_ID).catch(() => null);
+      if (saved && saved.fileSize === videoBlob.size && saved.contentType === contentType) {
+        uploadId = saved.uploadId;
+        s3Key = saved.s3Key;
+        partSize = saved.partSize;
+        partCount = saved.partCount;
+        completedEtags = saved.etags || [];
+        resumed = true;
+      } else {
+        // 기존 잔존 state가 있다면 정리 (다른 blob이라 못 씀)
+        if (saved) await idbClearUploadState(DB_SESSION_ID).catch(() => {});
+
+        // 1) init
+        const { width: videoWidth, height: videoHeight } = await getVideoDimensions(videoBlob);
+        const initBody = {
+          content_type: contentType,
+          file_size: videoBlob.size,
+        };
+        if (videoWidth > 0 && videoHeight > 0) {
+          initBody.width = videoWidth;
+          initBody.height = videoHeight;
+        }
+        const initRes = await fetch(`${apiBase}/upload/init`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(initBody),
+        });
+        if (!initRes.ok) throw new Error(`init 실패 (${initRes.status})`);
+        ({ upload_id: uploadId, s3_key: s3Key, part_size: partSize, part_count: partCount } = await initRes.json());
+
+        // 진행 상태 저장 (이후 새로고침/크래시 시 재개 가능)
+        await idbSaveUploadInit(DB_SESSION_ID, {
+          uploadId, s3Key, partSize, partCount,
+          contentType, fileSize: videoBlob.size,
+          etags: [],
+        });
       }
-      const initRes = await fetch(`${apiBase}/upload/init`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(initBody),
-      });
-      if (!initRes.ok) throw new Error(`init 실패 (${initRes.status})`);
-      ({ upload_id: uploadId, s3_key: s3Key, part_size: partSize, part_count: partCount } = await initRes.json());
 
-      // 2) part-urls (한 번에 다 발급)
-      const partNumbers = Array.from({ length: partCount }, (_, i) => i + 1);
-      const urlsRes = await fetch(`${apiBase}/upload/part-urls`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ upload_id: uploadId, s3_key: s3Key, part_numbers: partNumbers }),
-      });
-      if (!urlsRes.ok) throw new Error(`part-urls 실패 (${urlsRes.status})`);
-      const { urls } = await urlsRes.json();
+      // 누락된 파트 번호만 추려서 URL 발급
+      const completedSet = new Set(completedEtags.map(e => e.part_number));
+      const missingPartNumbers = [];
+      for (let n = 1; n <= partCount; n++) {
+        if (!completedSet.has(n)) missingPartNumbers.push(n);
+      }
 
-      // 3) 병렬 PUT (UPLOAD_CONCURRENCY 만큼 동시 진행)
-      btn.textContent = "업로드 중... 0%";
+      let urls = {};
+      if (missingPartNumbers.length > 0) {
+        const urlsRes = await fetch(`${apiBase}/upload/part-urls`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ upload_id: uploadId, s3_key: s3Key, part_numbers: missingPartNumbers }),
+        });
+        if (!urlsRes.ok) throw new Error(`part-urls 실패 (${urlsRes.status})`);
+        ({ urls } = await urlsRes.json());
+      }
+
+      // 3) 병렬 PUT — 누락 파트만
       const etags = new Array(partCount);
-      let completed = 0;
+      for (const e of completedEtags) etags[e.part_number - 1] = e;
+      let completed = completedEtags.length;
+      const initialPct = (completed / partCount) * 100;
+      setProgress(initialPct);
+      btn.textContent = resumed
+        ? `이어서 업로드 중... ${initialPct.toFixed(0)}%`
+        : `업로드 중... ${initialPct.toFixed(0)}%`;
 
       async function worker(queue) {
         while (queue.length > 0) {
@@ -578,15 +672,18 @@
           const chunk = videoBlob.slice(start, end);
           const etag = await putWithRetry(urls[n], chunk);
           etags[n - 1] = { part_number: n, etag };
+          // 진행 상태 영속화 (race-safe)
+          await idbAddUploadEtag(DB_SESSION_ID, n, etag).catch(() => {});
           completed++;
           const pct = (completed / partCount) * 100;
           setProgress(pct);
-          btn.textContent = `업로드 중... ${pct.toFixed(0)}%`;
+          const prefix = resumed ? "이어서 업로드 중..." : "업로드 중...";
+          btn.textContent = `${prefix} ${pct.toFixed(0)}%`;
         }
       }
-      const queue = [...partNumbers];
+      const queue = [...missingPartNumbers];
       await Promise.all(
-        Array.from({ length: Math.min(UPLOAD_CONCURRENCY, partCount) }, () => worker(queue))
+        Array.from({ length: Math.min(UPLOAD_CONCURRENCY, Math.max(1, queue.length)) }, () => worker(queue))
       );
 
       // 4) complete
@@ -605,24 +702,18 @@
         { method: "POST" }
       );
       try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
+      try { await idbClearUploadState(DB_SESSION_ID); } catch {}
 
       hideProgress();
       btn.className = "upload-btn success";
       btn.textContent = "업로드 완료 ✅";
       setStatus("done", "모든 작업이 완료됐어요!");
     } catch (e) {
-      // 실패 시 S3 조각 정리 시도 (best effort)
-      if (uploadId && s3Key) {
-        fetch(`${apiBase}/upload/abort`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ upload_id: uploadId, s3_key: s3Key }),
-        }).catch(() => {});
-      }
+      // 재시도를 위해 진행 상태(IDB)는 유지. 사용자가 '이어서 업로드' 누르면 그 자리부터.
       hideProgress();
       btn.disabled = false;
       btn.className = "upload-btn";
-      btn.textContent = "다시 업로드";
+      btn.textContent = "이어서 업로드";
       setMsg(`업로드 실패: ${e.message}`);
     }
   }
