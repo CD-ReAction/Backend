@@ -18,8 +18,8 @@ class Settings(BaseSettings):
 
     # File Upload (multipart)
     MAX_VIDEO_SIZE_MB: int = 8192          # 1시간 1080p@4Mbps ≈ 1.8GB, 여유 두고 8GB
-    UPLOAD_PART_SIZE_MB: int = 8           # 권장 5~10MB, S3 최소 5MB
-    UPLOAD_MAX_PARTS: int = 1024           # 8MB × 1024 = 8GB까지
+    UPLOAD_PART_SIZE_MB: int = 16          # S3 최소 5MB. 16MB로 HTTP 오버헤드 감소
+    UPLOAD_MAX_PARTS: int = 1024           # 16MB × 1024 = 16GB까지
     UPLOAD_URL_EXPIRES_SECONDS: int = 3600 # 파트별 presigned URL 유효시간
 
     # Face Analyzer service (RunPod Serverless)
