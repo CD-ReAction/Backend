@@ -53,6 +53,12 @@ def _make_code() -> str:
     return "".join(secrets.choice(chars) for _ in range(4))
 
 
+def _utc_iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    return f"{dt.isoformat()}Z"
+
+
 async def _get_session(session_id: str, db: AsyncSession) -> CameraSession:
     result = await db.execute(
         select(CameraSession).where(CameraSession.id == session_id)
@@ -104,7 +110,7 @@ async def create_camera_session(
         session_id=s.id,
         code=s.code,
         camera_url=s.camera_url,
-        expires_at=s.expires_at.isoformat(),
+        expires_at=_utc_iso(s.expires_at),
         db_session_id=s.db_session_id,
     )
 
@@ -147,7 +153,7 @@ async def get_or_create_camera_session(
         session_id=existing.id,
         code=existing.code,
         camera_url=existing.camera_url,
-        expires_at=existing.expires_at.isoformat(),
+        expires_at=_utc_iso(existing.expires_at),
         db_session_id=existing.db_session_id,
     )
 
@@ -175,8 +181,8 @@ async def get_camera_session_status(
     return CameraStatusResponse(
         session_id=s.id,
         status=s.status,
-        connected_at=s.connected_at.isoformat() if s.connected_at else None,
-        recording_started_at=s.recording_started_at.isoformat() if s.recording_started_at else None,
+        connected_at=_utc_iso(s.connected_at),
+        recording_started_at=_utc_iso(s.recording_started_at),
         recording_elapsed_seconds=recording_elapsed_seconds,
         video_url=s.video_url,
     )
@@ -209,7 +215,7 @@ async def mark_recording(
     return {
         "ok": True,
         "status": "recording",
-        "recording_started_at": s.recording_started_at.isoformat(),
+        "recording_started_at": _utc_iso(s.recording_started_at),
     }
 
 
