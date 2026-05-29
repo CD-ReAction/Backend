@@ -394,6 +394,7 @@ async def get_video(
         select(CameraSession)
         .where(CameraSession.db_session_id == session_id)
         .order_by(CameraSession.expires_at.desc())
+        .limit(1)
     )
     camera_session = camera_result.scalar_one_or_none()
     recording_started_at = (
