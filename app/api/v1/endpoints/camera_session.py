@@ -203,8 +203,8 @@ async def mark_recording(
     """촬영 버튼 누를 때 호출 → status: recording"""
     s = await _get_session(session_id, db)
     s.status = "recording"
-    if not s.recording_started_at:
-        s.recording_started_at = datetime.utcnow()
+    s.recording_started_at = datetime.utcnow()
+    s.video_url = None
     await db.commit()
     return {
         "ok": True,
