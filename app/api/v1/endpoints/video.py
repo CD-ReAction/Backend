@@ -107,6 +107,12 @@ def _decode_analysis_result(raw_result: str | None) -> Any:
         return raw_result
 
 
+def _utc_iso(dt: datetime | None) -> str | None:
+    if dt is None:
+        return None
+    return f"{dt.isoformat()}Z"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Callback schema
 # ─────────────────────────────────────────────────────────────────────────────
@@ -409,8 +415,8 @@ async def get_video(
         "s3_url": playback_url,
         "analysis_status": video.analysis_status,
         "is_landscape": video.is_landscape,
-        "recording_started_at": recording_started_at.isoformat() if recording_started_at else None,
-        "video_zero_at": recording_started_at.isoformat() if recording_started_at else None,
+        "recording_started_at": _utc_iso(recording_started_at),
+        "video_zero_at": _utc_iso(recording_started_at),
         "trim_offset_seconds": 0,
     }
 
