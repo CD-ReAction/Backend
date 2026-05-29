@@ -38,7 +38,7 @@ from app.core.s3 import (
     generate_part_upload_url,
     generate_presigned_url,
 )
-from app.models.models import Actor, Session, Video, VideoActor
+from app.models.models import Actor, CameraSession, Session, Video, VideoActor
 
 router = APIRouter(prefix="/sessions/{session_id}/video", tags=["video"])
 analysis_router = APIRouter(prefix="/videos", tags=["video"])
@@ -384,12 +384,26 @@ async def get_video(
         raise HTTPException(status_code=404, detail="영상을 찾을 수 없어요")
 
     playback_url = generate_presigned_url(video.s3_key) if video.s3_key else None
+    camera_result = await db.execute(
+        select(CameraSession)
+        .where(CameraSession.db_session_id == session_id)
+        .order_by(CameraSession.expires_at.desc())
+    )
+    camera_session = camera_result.scalar_one_or_none()
+    recording_started_at = (
+        camera_session.recording_started_at
+        if camera_session and camera_session.recording_started_at
+        else None
+    )
 
     return {
         "video_id": video.video_id,
         "s3_url": playback_url,
         "analysis_status": video.analysis_status,
         "is_landscape": video.is_landscape,
+        "recording_started_at": recording_started_at.isoformat() if recording_started_at else None,
+        "video_zero_at": recording_started_at.isoformat() if recording_started_at else None,
+        "trim_offset_seconds": 0,
     }
 
 

@@ -38,6 +38,8 @@ class CameraStatusResponse(BaseModel):
     session_id: str
     status: str  # yet | connect | recording | end | done | expired
     connected_at: Optional[str] = None
+    recording_started_at: Optional[str] = None
+    recording_elapsed_seconds: Optional[int] = None
     video_url: Optional[str] = None
 
 
@@ -157,15 +159,25 @@ async def get_camera_session_status(
 ):
     """노트북이 폴링 — 현재 상태 반환"""
     s = await _get_session(session_id, db)
+    now = datetime.utcnow()
 
-    if s.status != "expired" and datetime.utcnow() > s.expires_at:
+    if s.status != "expired" and now > s.expires_at:
         s.status = "expired"
         await db.commit()
+
+    recording_elapsed_seconds = None
+    if s.status == "recording" and s.recording_started_at:
+        recording_elapsed_seconds = max(
+            0,
+            int((now - s.recording_started_at).total_seconds()),
+        )
 
     return CameraStatusResponse(
         session_id=s.id,
         status=s.status,
         connected_at=s.connected_at.isoformat() if s.connected_at else None,
+        recording_started_at=s.recording_started_at.isoformat() if s.recording_started_at else None,
+        recording_elapsed_seconds=recording_elapsed_seconds,
         video_url=s.video_url,
     )
 
@@ -191,8 +203,14 @@ async def mark_recording(
     """촬영 버튼 누를 때 호출 → status: recording"""
     s = await _get_session(session_id, db)
     s.status = "recording"
+    if not s.recording_started_at:
+        s.recording_started_at = datetime.utcnow()
     await db.commit()
-    return {"ok": True, "status": "recording"}
+    return {
+        "ok": True,
+        "status": "recording",
+        "recording_started_at": s.recording_started_at.isoformat(),
+    }
 
 
 @router.post("/{session_id}/stop")
