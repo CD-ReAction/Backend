@@ -47,6 +47,7 @@ class SessionOut(BaseModel):
     title: Optional[str]
     s_category: SessionCategory
     in_progress: bool  # True = 진행중, False = 진행 완료 (영상 업로드 완료 시 자동 False)
+    matching_completed: bool  # True = 세션 생성자가 배우 태그 매칭 완료 버튼을 누름
     created_at: str
 
 
@@ -166,6 +167,7 @@ async def create_session(
         title=body.title,
         s_category=body.s_category,
         in_progress=True,
+        matching_completed=False,
     )
     db.add(session)
     await db.flush()
@@ -176,6 +178,7 @@ async def create_session(
         project_id=session.project_id,
         title=session.title,
         in_progress=session.in_progress,
+        matching_completed=session.matching_completed,
         created_at=session.created_at.isoformat(),
     )
 
@@ -199,6 +202,7 @@ async def get_sessions(
             project_id=s.project_id,
             title=s.title,
             in_progress=s.in_progress,
+            matching_completed=s.matching_completed,
             created_at=s.created_at.isoformat(),
         )
         for s in sessions
@@ -235,6 +239,7 @@ async def list_sessions(
             project_id=s.project_id,
             title=s.title,
             in_progress=s.in_progress,
+            matching_completed=s.matching_completed,
             created_at=s.created_at.isoformat(),
         )
         for s in sessions

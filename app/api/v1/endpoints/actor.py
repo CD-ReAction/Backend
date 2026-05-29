@@ -215,9 +215,10 @@ async def complete_matching(
     user_id: int = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """세션 생성자가 매칭을 끝냈음을 표시 (in_progress=False).
+    """세션 생성자가 매칭을 끝냈음을 표시.
 
-    비소유자는 GET /projects/{pid}/sessions polling으로 이 변화를 감지해 review로 이동.
+    비소유자는 GET /projects/{pid}/sessions polling으로 matching_completed=True를
+    감지해 review로 이동.
     """
     result = await db.execute(select(Session).where(Session.session_id == session_id))
     session = result.scalar_one_or_none()
@@ -226,10 +227,11 @@ async def complete_matching(
     if session.created_by_user_id != user_id:
         raise HTTPException(status_code=403, detail="세션 생성자만 매칭을 완료할 수 있어요")
 
-    session.in_progress = False
+    session.matching_completed = True
     await db.commit()
 
     return {
         "session_id": session.session_id,
         "in_progress": session.in_progress,
+        "matching_completed": session.matching_completed,
     }

@@ -103,6 +103,7 @@ class Session(Base):
     title = Column(String, nullable=True)
     s_category = Column(Enum(SessionCategory), nullable=False)
     in_progress = Column(Boolean, default=False)
+    matching_completed = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     project = relationship("Project", back_populates="sessions")
