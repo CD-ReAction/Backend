@@ -28,6 +28,7 @@ async def _assert_session_creator(db: AsyncSession, session_id: int, user_id: in
 
 router = APIRouter(prefix="/actors", tags=["actors"])
 project_router = APIRouter(prefix="/projects", tags=["actors"])
+session_router = APIRouter(prefix="/sessions", tags=["actors"])
 
 
 class ActorCreateRequest(BaseModel):
@@ -206,3 +207,29 @@ async def delete_actor(
     await db.commit()
 
     return {"deleted_actor_id": actor_id}
+
+
+@session_router.post("/{session_id}/matching/complete")
+async def complete_matching(
+    session_id: int,
+    user_id: int = Query(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """세션 생성자가 매칭을 끝냈음을 표시 (in_progress=False).
+
+    비소유자는 GET /projects/{pid}/sessions polling으로 이 변화를 감지해 review로 이동.
+    """
+    result = await db.execute(select(Session).where(Session.session_id == session_id))
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=404, detail="세션을 찾을 수 없어요")
+    if session.created_by_user_id != user_id:
+        raise HTTPException(status_code=403, detail="세션 생성자만 매칭을 완료할 수 있어요")
+
+    session.in_progress = False
+    await db.commit()
+
+    return {
+        "session_id": session.session_id,
+        "in_progress": session.in_progress,
+    }

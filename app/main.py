@@ -31,6 +31,7 @@ app.include_router(feedback.router, prefix=API_PREFIX)
 app.include_router(project.router, prefix=API_PREFIX)
 app.include_router(actor.router, prefix=API_PREFIX)
 app.include_router(actor.project_router, prefix=API_PREFIX)
+app.include_router(actor.session_router, prefix=API_PREFIX)
 
 
 @app.on_event("startup")
