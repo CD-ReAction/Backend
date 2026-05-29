@@ -375,10 +375,31 @@ async def abort_video_upload(
 @router.get("")
 async def get_video(
     session_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """세션의 영상 다시보기 정보. 세션 참여자 누구나 호출 가능."""
+    result = await db.execute(select(Video).where(Video.session_id == session_id))
+    video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="영상을 찾을 수 없어요")
+
+    playback_url = generate_presigned_url(video.s3_key) if video.s3_key else None
+
+    return {
+        "video_id": video.video_id,
+        "s3_url": playback_url,
+        "analysis_status": video.analysis_status,
+        "is_landscape": video.is_landscape,
+    }
+
+
+@router.get("/matching")
+async def get_video_matching(
+    session_id: int,
     user_id: int = Query(...),
     db: AsyncSession = Depends(get_db),
 ):
-    """세션의 영상 정보 + 영상에 등장한 actors 조회. 세션 생성자만 가능."""
+    """매칭 화면 데이터 (감지 결과 + 후보 배우들). 세션 생성자만 가능."""
     session_result = await db.execute(
         select(Session).where(Session.session_id == session_id)
     )
@@ -393,7 +414,6 @@ async def get_video(
     if not video:
         raise HTTPException(status_code=404, detail="영상을 찾을 수 없어요")
 
-    # 이 영상에 링크된 actors 조회 (is_new_in_video 포함)
     link_result = await db.execute(
         select(VideoActor, Actor)
         .join(Actor, Actor.actor_id == VideoActor.actor_id)
@@ -405,15 +425,11 @@ async def get_video(
         for link, actor in link_result.all()
     ]
 
-    playback_url = generate_presigned_url(video.s3_key) if video.s3_key else None
-
     return {
         "video_id": video.video_id,
-        "s3_url": playback_url,
         "analysis_status": video.analysis_status,
         "analysis_result": _decode_analysis_result(video.analysis_result),
         "actors": actors_payload,
-        "is_landscape": video.is_landscape,
     }
 
 
