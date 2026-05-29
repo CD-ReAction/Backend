@@ -158,10 +158,10 @@
   const TARGET_AUDIO_BPS = 128_000;
   // 5초 단위 청크 → 끊겨도 5초 이내 손실, IndexedDB로 백업
   const CHUNK_TIMESLICE_MS = 5000;
-  // 업로드 파트 크기: 백엔드 UPLOAD_PART_SIZE_MB (8MB) 와 일치시킴
-  const UPLOAD_PART_SIZE = 8 * 1024 * 1024;
-  // 동시 업로드 파트 수
-  const UPLOAD_CONCURRENCY = 4;
+  // 업로드 파트 크기: 백엔드 UPLOAD_PART_SIZE_MB (16MB) 와 일치시킴
+  const UPLOAD_PART_SIZE = 16 * 1024 * 1024;
+  // 동시 업로드 파트 수 (모바일에서 안정적인 상한)
+  const UPLOAD_CONCURRENCY = 6;
 
   let mediaRecorder = null;
   let stream = null;
