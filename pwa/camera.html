@@ -445,8 +445,10 @@
       const stored = await idbGetChunks(String(DB_SESSION_ID));
       const type = baseMime(stored[0]?.mimeType || currentMimeType);
       videoBlob = new Blob(stored.map(c => c.blob), { type });
+      // 정지 즉시 자동 업로드 시작. 실패 시 uploadVideo 내부에서 "다시 업로드" 버튼으로 폴백.
       document.getElementById("uploadBtn").style.display = "block";
-      setStatus("ready", "촬영 완료! 업로드 버튼을 눌러주세요");
+      setStatus("ready", "업로드 시작 중...");
+      uploadVideo();
     };
 
     mediaRecorder.start(CHUNK_TIMESLICE_MS);
