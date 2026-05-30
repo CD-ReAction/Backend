@@ -136,6 +136,7 @@ class Feedback(Base):
 
     feedback_id = Column(Integer, primary_key=True, index=True)
     session_id = Column(Integer, ForeignKey("sessions.session_id"), nullable=False)
+    created_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False, index=True)
     content = Column(Text, nullable=False)
     video_offset_seconds = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
