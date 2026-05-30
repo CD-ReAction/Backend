@@ -163,6 +163,11 @@
   // 동시 업로드 파트 수 (모바일에서 안정적인 상한)
   const UPLOAD_CONCURRENCY = 6;
 
+  // iOS Safari: requestFullscreen이 documentElement에서 동작 안 하고,
+  // autoplay가 엄격해서 srcObject 세팅 직후 명시적 play()가 필요함.
+  const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+                 (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+
   let mediaRecorder = null;
   let stream = null;
   let recording = false;
@@ -183,7 +188,7 @@
     return false;
   }
 
-  function buildRecordingStream(srcStream) {
+  async function buildRecordingStream(srcStream) {
     if (!shouldRotateForRecording(srcStream)) {
       return { stream: srcStream, cleanup: () => {} };
     }
@@ -192,7 +197,8 @@
     videoEl.srcObject = srcStream;
     videoEl.muted = true;
     videoEl.playsInline = true;
-    videoEl.play().catch(() => {});
+    // iOS Safari: 내부 video가 재생돼야 canvas에 프레임이 들어옴. await로 확실히 시작.
+    try { await videoEl.play(); } catch (e) { console.warn("canvas pipeline play 실패", e); }
 
     const canvas = document.createElement("canvas");
     canvas.width = 1920;
@@ -321,13 +327,15 @@
   // (모바일 브라우저는 fullscreen 없이 orientation lock 불가)
   // ──────────────────────────────────────────────────────────────────
   async function beginCamera() {
-    // 1. fullscreen 진입 (모바일에선 lock 전제조건)
-    try {
-      const el = document.documentElement;
-      if (el.requestFullscreen) await el.requestFullscreen();
-      else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
-    } catch (e) {
-      console.warn("fullscreen 실패", e);
+    // 1. fullscreen 진입 — iOS Safari는 documentElement에 안 됨, 시도 자체를 건너뜀
+    if (!IS_IOS) {
+      try {
+        const el = document.documentElement;
+        if (el.requestFullscreen) await el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+      } catch (e) {
+        console.warn("fullscreen 실패", e);
+      }
     }
     // 2. 가로 잠금 (iOS Safari는 미지원 → throw 무시)
     try {
@@ -360,7 +368,11 @@
         },
         audio: true,
       });
-      document.getElementById("videoPreview").srcObject = stream;
+      const videoEl = document.getElementById("videoPreview");
+      videoEl.srcObject = stream;
+      // iOS Safari는 await 여러 번 거치면 user-gesture 컨텍스트가 끊겨 autoplay 거부 → 까만 화면.
+      // 명시적 play()로 강제. muted+playsInline이라 사용자 탭 없어도 허용됨.
+      try { await videoEl.play(); } catch (e) { console.warn("preview play 실패", e); }
       setStatus("ready", "촬영 버튼을 눌러 시작하세요");
 
       await fetch(
@@ -413,7 +425,7 @@
     };
     if (currentMimeType) options.mimeType = currentMimeType;
 
-    recordingPipeline = buildRecordingStream(stream);
+    recordingPipeline = await buildRecordingStream(stream);
     const recStream = recordingPipeline.stream;
 
     try {
