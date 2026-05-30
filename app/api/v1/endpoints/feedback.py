@@ -37,6 +37,7 @@ class FeedbackUpdate(BaseModel):
 class FeedbackOut(BaseModel):
     feedback_id: int
     session_id: int
+    created_by_user_id: int
     content: str
     video_offset_seconds: Optional[float]
     actor_ids: List[int]
@@ -49,6 +50,7 @@ class FeedbackOut(BaseModel):
 class FeedbackWithTags(BaseModel):
     feedback_id: int
     session_id: int
+    created_by_user_id: int
     content: str
     video_offset_seconds: Optional[float]
     actor_ids: List[int]
@@ -63,11 +65,13 @@ class FeedbackWithTags(BaseModel):
 async def create_feedback(
     session_id: int,
     body: FeedbackCreate,
+    user_id: int = Query(..., description="작성자 user_id"),
     db: AsyncSession = Depends(get_db),
 ):
     """피드백 작성 (영상 촬영 중 실시간 작성 가능). actor_ids로 대상 배우 여러 명 지정 가능"""
     feedback = Feedback(
         session_id=session_id,
+        created_by_user_id=user_id,
         content=body.content,
         video_offset_seconds=body.video_offset_seconds,
     )
@@ -93,6 +97,7 @@ async def create_feedback(
     return FeedbackOut(
         feedback_id=feedback.feedback_id,
         session_id=feedback.session_id,
+        created_by_user_id=feedback.created_by_user_id,
         content=feedback.content,
         video_offset_seconds=feedback.video_offset_seconds,
         actor_ids=actor_ids,
@@ -104,9 +109,11 @@ async def create_feedback(
 async def get_feedbacks(
     session_id: int,
     actor_ids: List[int] = Query(default=[]),  # 여러 개 가능: ?actor_ids=1&actor_ids=2
+    user_id: Optional[int] = Query(default=None, description="지정 시 해당 사용자가 작성한 피드백만 반환"),
     db: AsyncSession = Depends(get_db),
 ):
-    """세션의 피드백 조회. actor_ids 지정 시 해당 배우 중 한 명이라도 연결된 피드백만 (OR)"""
+    """세션의 피드백 조회. actor_ids 지정 시 해당 배우 중 한 명이라도 연결된 피드백만 (OR).
+    user_id 지정 시 해당 사용자가 작성한 피드백만 (작성 화면용). 미지정 시 세션의 모든 피드백 (다시보기용)."""
     query = select(Feedback).where(Feedback.session_id == session_id)
     if actor_ids:
         sub = (
@@ -114,6 +121,8 @@ async def get_feedbacks(
             .where(FeedbackActor.actor_id.in_(actor_ids))
         )
         query = query.where(Feedback.feedback_id.in_(sub))
+    if user_id is not None:
+        query = query.where(Feedback.created_by_user_id == user_id)
     query = query.order_by(Feedback.created_at)
 
     result = await db.execute(query)
@@ -127,6 +136,7 @@ async def get_feedbacks(
         FeedbackOut(
             feedback_id=f.feedback_id,
             session_id=f.session_id,
+            created_by_user_id=f.created_by_user_id,
             content=f.content,
             video_offset_seconds=f.video_offset_seconds,
             actor_ids=actors_by_feedback.get(f.feedback_id, []),
@@ -208,12 +218,14 @@ async def filter_feedbacks(
     priority: Optional[str] = None,   # required | recommended | discussion | praise
     category: Optional[str] = None,   # 예: acting:tone, vocal:pitch
     actor_ids: List[int] = Query(default=[]),  # 여러 배우 중 한 명이라도 연결된 피드백 (OR)
+    user_id: Optional[int] = Query(default=None, description="지정 시 해당 사용자가 작성한 피드백만 반환"),
     db: AsyncSession = Depends(get_db),
 ):
     """
-    우선순위·카테고리·배우로 피드백 필터링 (전부 선택적)
+    우선순위·카테고리·배우·작성자로 피드백 필터링 (전부 선택적)
     - priority/category 조건은 AND
     - actor_ids는 그 중 한 명이라도 매칭되면 포함 (OR)
+    - user_id 지정 시 해당 사용자가 작성한 피드백만 (AND, 작성 화면용)
     - 여러 조건 함께 지정 시 전부 만족해야 함 (AND across types)
     - 아무 조건도 없으면: 세션의 모든 피드백
     """
@@ -256,6 +268,8 @@ async def filter_feedbacks(
         if not matching_ids:
             return []
         query = query.where(Feedback.feedback_id.in_(matching_ids))
+    if user_id is not None:
+        query = query.where(Feedback.created_by_user_id == user_id)
     query = query.order_by(Feedback.created_at)
 
     result = await db.execute(query)
@@ -282,6 +296,7 @@ async def filter_feedbacks(
         output.append(FeedbackWithTags(
             feedback_id=fb.feedback_id,
             session_id=fb.session_id,
+            created_by_user_id=fb.created_by_user_id,
             content=fb.content,
             video_offset_seconds=fb.video_offset_seconds,
             actor_ids=actors_by_feedback.get(fb.feedback_id, []),
@@ -296,10 +311,12 @@ async def update_feedback(
     session_id: int,
     feedback_id: int,
     body: FeedbackUpdate,
+    user_id: int = Query(..., description="요청자 user_id (작성자 본인만 수정 가능)"),
     db: AsyncSession = Depends(get_db),
 ):
     """피드백 수정 (content / video_offset_seconds / actor_ids 부분 수정 가능).
-    actor_ids 지정 시 기존 연결을 전체 교체. 빈 리스트면 전부 해제."""
+    actor_ids 지정 시 기존 연결을 전체 교체. 빈 리스트면 전부 해제.
+    작성자 본인이 아니면 403."""
     result = await db.execute(
         select(Feedback).where(
             Feedback.feedback_id == feedback_id,
@@ -309,6 +326,9 @@ async def update_feedback(
     feedback = result.scalar_one_or_none()
     if not feedback:
         raise HTTPException(status_code=404, detail="피드백을 찾을 수 없어요")
+
+    if feedback.created_by_user_id != user_id:
+        raise HTTPException(status_code=403, detail="작성자만 수정할 수 있어요")
 
     update_data = body.model_dump(exclude_unset=True)
     if not update_data:
@@ -352,6 +372,7 @@ async def update_feedback(
     return FeedbackOut(
         feedback_id=feedback.feedback_id,
         session_id=feedback.session_id,
+        created_by_user_id=feedback.created_by_user_id,
         content=feedback.content,
         video_offset_seconds=feedback.video_offset_seconds,
         actor_ids=actors_by_feedback.get(feedback_id, []),
@@ -363,9 +384,10 @@ async def update_feedback(
 async def delete_feedback(
     session_id: int,
     feedback_id: int,
+    user_id: int = Query(..., description="요청자 user_id (작성자 본인만 삭제 가능)"),
     db: AsyncSession = Depends(get_db),
 ):
-    """피드백 삭제"""
+    """피드백 삭제. 작성자 본인이 아니면 403."""
     result = await db.execute(
         select(Feedback).where(
             Feedback.feedback_id == feedback_id,
@@ -375,6 +397,9 @@ async def delete_feedback(
     feedback = result.scalar_one_or_none()
     if not feedback:
         raise HTTPException(status_code=404, detail="피드백을 찾을 수 없어요")
+
+    if feedback.created_by_user_id != user_id:
+        raise HTTPException(status_code=403, detail="작성자만 삭제할 수 있어요")
 
     await db.delete(feedback)
 
