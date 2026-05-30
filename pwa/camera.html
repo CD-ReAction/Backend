@@ -170,8 +170,6 @@
   let currentMimeType = "";
   let pendingChunkWrites = 0;
   let recordingPipeline = null;
-  // 스트리밍 업로드 상태 (녹화 중 동시 업로드용)
-  let streamingState = null;
 
   // ──────────────────────────────────────────────────────────────────
   // 폰이 세로면 캔버스로 90° 회전시켜서 항상 가로 픽셀로 녹화
@@ -406,7 +404,6 @@
     // 새 녹화 시작 전 이전 청크 정리
     try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
     videoBlob = null;
-    streamingState = null;
     document.getElementById("uploadBtn").style.display = "none";
 
     currentMimeType = pickMimeType();
@@ -415,15 +412,6 @@
       audioBitsPerSecond: TARGET_AUDIO_BPS,
     };
     if (currentMimeType) options.mimeType = currentMimeType;
-
-    // 스트리밍 업로드 init — 실패 시 녹화 중단하지 않고 폴백 모드(녹화 후 일괄 업로드)로 진행
-    const contentType = baseMime(currentMimeType || "video/webm");
-    try {
-      streamingState = await initStreamingUpload(contentType);
-    } catch (e) {
-      console.warn("스트리밍 업로드 init 실패 — 녹화 후 일괄 업로드로 폴백", e);
-      streamingState = null;
-    }
 
     recordingPipeline = buildRecordingStream(stream);
     const recStream = recordingPipeline.stream;
@@ -446,10 +434,6 @@
       } finally {
         pendingChunkWrites--;
       }
-      // 스트리밍 모드면 동시에 업로드 파이프라인에 투입
-      if (streamingState && !streamingState.failed) {
-        streamingFeedChunk(e.data);
-      }
     };
     mediaRecorder.onstop = async () => {
       // ondataavailable이 비동기라 IDB 쓰기 끝날 때까지 대기
@@ -458,40 +442,19 @@
         recordingPipeline.cleanup();
         recordingPipeline = null;
       }
-
-      // 스트리밍 모드 성공 시: 잔여 flush + complete → 즉시 완료 처리
-      if (streamingState && !streamingState.failed) {
-        try {
-          setStatus("ready", "업로드 마무리 중...");
-          const data = await finalizeStreaming();
-          await fetch(
-            `${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/done?video_url=${encodeURIComponent(data.s3_url || "")}`,
-            { method: "POST" }
-          );
-          try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
-          streamingState = null;
-          hideProgress();
-          setStatus("done", "모든 작업이 완료됐어요!");
-          return;
-        } catch (e) {
-          console.warn("스트리밍 마무리 실패 — 일괄 업로드로 폴백", e);
-          streamingState = null;
-          // 폴백 — 일괄 업로드 UX로
-        }
-      }
-
-      // 폴백 또는 처음부터 비스트리밍 모드
       const stored = await idbGetChunks(String(DB_SESSION_ID));
       const type = baseMime(stored[0]?.mimeType || currentMimeType);
       videoBlob = new Blob(stored.map(c => c.blob), { type });
+      // 정지 즉시 자동 업로드 시작. 실패 시 uploadVideo 내부에서 "다시 업로드" 버튼으로 폴백.
       document.getElementById("uploadBtn").style.display = "block";
-      setStatus("ready", "촬영 완료! 업로드 버튼을 눌러주세요");
+      setStatus("ready", "업로드 시작 중...");
+      uploadVideo();
     };
 
     mediaRecorder.start(CHUNK_TIMESLICE_MS);
     recording = true;
     document.getElementById("recordBtn").className = "record-btn recording";
-    setStatus("recording", streamingState ? "녹화 중 — 실시간 업로드" : "녹화 중...");
+    setStatus("recording", "녹화 중...");
 
     fetch(`${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/recording`, { method: "POST" });
 
@@ -540,135 +503,6 @@
       };
       v.src = url;
     });
-  }
-
-  // ──────────────────────────────────────────────────────────────────
-  // 스트리밍 업로드: 녹화 중 발생하는 청크를 partSize(16MB) 단위로 모아 즉시 S3 PUT
-  // 정지 시점엔 잔여분 + complete만 호출하므로 체감 업로드 시간이 거의 0
-  // ──────────────────────────────────────────────────────────────────
-  async function initStreamingUpload(contentType) {
-    const apiBase = `${CONFIG.API_BASE_URL}/api/v1/sessions/${DB_SESSION_ID}/video`;
-    const initRes = await fetch(`${apiBase}/upload/init`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ content_type: contentType }), // file_size 미정 → 옵셔널
-    });
-    if (!initRes.ok) throw new Error(`init 실패 (${initRes.status})`);
-    const { upload_id, s3_key, part_size } = await initRes.json();
-
-    return {
-      apiBase,
-      contentType,
-      uploadId: upload_id,
-      s3Key: s3_key,
-      partSize: part_size,
-      buffer: [],          // 미분할 청크들(Blob[])
-      bufferSize: 0,
-      nextPartNumber: 1,
-      pendingPartsQueue: [],  // [{partNumber, blob}, ...]
-      etags: [],           // 완료된 파트들
-      workerActive: false,
-      failed: null,        // 업로드 도중 에러
-      stopRequested: false,
-    };
-  }
-
-  // 버퍼에 청크 누적 → partSize 차면 cut & enqueue → worker 트리거
-  function streamingFeedChunk(chunkBlob) {
-    if (!streamingState || streamingState.failed) return;
-    streamingState.buffer.push(chunkBlob);
-    streamingState.bufferSize += chunkBlob.size;
-
-    while (streamingState.bufferSize >= streamingState.partSize) {
-      streamingCutPart(streamingState.partSize);
-    }
-
-    if (!streamingState.workerActive) streamingStartWorker();
-  }
-
-  // 버퍼에서 targetSize 바이트만큼 잘라 다음 파트로 등록. 잔여는 버퍼에 남김.
-  function streamingCutPart(targetSize) {
-    const combined = new Blob(streamingState.buffer, { type: streamingState.contentType });
-    const actual = Math.min(targetSize, combined.size);
-    const partBlob = combined.slice(0, actual);
-    const remainder = combined.slice(actual);
-    streamingState.buffer = remainder.size > 0 ? [remainder] : [];
-    streamingState.bufferSize = remainder.size;
-
-    const partNumber = streamingState.nextPartNumber++;
-    streamingState.pendingPartsQueue.push({ partNumber, blob: partBlob });
-  }
-
-  // 큐에 쌓인 파트를 순차 업로드 (회선 1개로 충분 — 녹화 0.5MB/s vs 업로드 1MB/s+)
-  async function streamingStartWorker() {
-    if (streamingState.workerActive) return;
-    streamingState.workerActive = true;
-    try {
-      while (streamingState.pendingPartsQueue.length > 0) {
-        const { partNumber, blob } = streamingState.pendingPartsQueue.shift();
-        const urlsRes = await fetch(`${streamingState.apiBase}/upload/part-urls`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            upload_id: streamingState.uploadId,
-            s3_key: streamingState.s3Key,
-            part_numbers: [partNumber],
-          }),
-        });
-        if (!urlsRes.ok) throw new Error(`part-urls 실패 (${urlsRes.status})`);
-        const { urls } = await urlsRes.json();
-        const etag = await putWithRetry(urls[partNumber], blob);
-        streamingState.etags.push({ part_number: partNumber, etag });
-        streamingUpdateUi();
-      }
-    } catch (e) {
-      streamingState.failed = e;
-    } finally {
-      streamingState.workerActive = false;
-    }
-  }
-
-  function streamingUpdateUi() {
-    if (!streamingState) return;
-    const uploadedMb = (streamingState.etags.length * streamingState.partSize / (1024 * 1024)).toFixed(0);
-    const baseText = recording ? "녹화 중 — 업로드" : "업로드 마무리 중";
-    document.getElementById("statusText").textContent = `${baseText} (${uploadedMb}MB 전송)`;
-  }
-
-  // 정지 시 호출 — 잔여 버퍼 flush + 큐 드레인 + /upload/complete
-  async function finalizeStreaming() {
-    if (!streamingState) return null;
-    streamingState.stopRequested = true;
-
-    // 잔여 버퍼를 마지막 파트로 (5MB 미만 OK — S3는 마지막 파트만 예외)
-    if (streamingState.bufferSize > 0) {
-      streamingCutPart(streamingState.bufferSize);
-    }
-    if (!streamingState.workerActive) streamingStartWorker();
-
-    // 큐 드레인 대기
-    while (streamingState.pendingPartsQueue.length > 0 || streamingState.workerActive) {
-      if (streamingState.failed) throw streamingState.failed;
-      await new Promise(r => setTimeout(r, 100));
-    }
-    if (streamingState.failed) throw streamingState.failed;
-
-    if (streamingState.etags.length === 0) {
-      throw new Error("업로드된 파트가 없어요 (녹화 데이터 없음)");
-    }
-
-    // complete
-    const completeRes = await fetch(`${streamingState.apiBase}/upload/complete`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        upload_id: streamingState.uploadId,
-        s3_key: streamingState.s3Key,
-        parts: streamingState.etags.slice().sort((a, b) => a.part_number - b.part_number),
-      }),
-    });
-    if (!completeRes.ok) throw new Error(`complete 실패 (${completeRes.status})`);
-    return await completeRes.json();
   }
 
   async function putWithRetry(url, blob, maxAttempts = 4) {
