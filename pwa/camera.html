@@ -97,9 +97,41 @@
       height: 100%; width: 0%;
       background: #3b82f6; transition: width 0.2s;
     }
+    .start-overlay {
+      position: fixed; inset: 0;
+      z-index: 100;
+      background: #000;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      gap: 24px; padding: 24px;
+    }
+    .start-overlay.hidden { display: none; }
+    .start-icon { font-size: 56px; }
+    .start-text {
+      font-size: 16px; line-height: 1.6;
+      color: rgba(255,255,255,0.85);
+      text-align: center;
+    }
+    .start-btn {
+      margin-top: 12px;
+      padding: 16px 28px;
+      background: white; color: #111;
+      border: none; border-radius: 14px;
+      font-size: 16px; font-weight: 600;
+      cursor: pointer;
+    }
   </style>
 </head>
 <body>
+  <div class="start-overlay" id="startOverlay">
+    <div class="start-icon">📱↻</div>
+    <div class="start-text">
+      핸드폰을 가로로 돌린 뒤<br>
+      아래 버튼을 눌러주세요
+    </div>
+    <button class="start-btn" onclick="beginCamera()">촬영 준비</button>
+  </div>
+
   <div class="header">
     <div class="dot" id="statusDot"></div>
     <span class="status-text" id="statusText">카메라 준비 중...</span>
@@ -126,10 +158,10 @@
   const TARGET_AUDIO_BPS = 128_000;
   // 5초 단위 청크 → 끊겨도 5초 이내 손실, IndexedDB로 백업
   const CHUNK_TIMESLICE_MS = 5000;
-  // 업로드 파트 크기: 백엔드 UPLOAD_PART_SIZE_MB (8MB) 와 일치시킴
-  const UPLOAD_PART_SIZE = 8 * 1024 * 1024;
-  // 동시 업로드 파트 수
-  const UPLOAD_CONCURRENCY = 4;
+  // 업로드 파트 크기: 백엔드 UPLOAD_PART_SIZE_MB (16MB) 와 일치시킴
+  const UPLOAD_PART_SIZE = 16 * 1024 * 1024;
+  // 동시 업로드 파트 수 (모바일에서 안정적인 상한)
+  const UPLOAD_CONCURRENCY = 6;
 
   let mediaRecorder = null;
   let stream = null;
@@ -137,6 +169,73 @@
   let videoBlob = null;
   let currentMimeType = "";
   let pendingChunkWrites = 0;
+  let recordingPipeline = null;
+  // 스트리밍 업로드 상태 (녹화 중 동시 업로드용)
+  let streamingState = null;
+
+  // ──────────────────────────────────────────────────────────────────
+  // 폰이 세로면 캔버스로 90° 회전시켜서 항상 가로 픽셀로 녹화
+  // ──────────────────────────────────────────────────────────────────
+  function shouldRotateForRecording(srcStream) {
+    const orient = screen.orientation?.type || "";
+    if (orient.startsWith("portrait")) return true;
+    const track = srcStream.getVideoTracks()[0];
+    const { width, height } = track.getSettings();
+    if (width && height && height > width) return true;
+    return false;
+  }
+
+  function buildRecordingStream(srcStream) {
+    if (!shouldRotateForRecording(srcStream)) {
+      return { stream: srcStream, cleanup: () => {} };
+    }
+
+    const videoEl = document.createElement("video");
+    videoEl.srcObject = srcStream;
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+    videoEl.play().catch(() => {});
+
+    const canvas = document.createElement("canvas");
+    canvas.width = 1920;
+    canvas.height = 1080;
+    const ctx = canvas.getContext("2d");
+
+    let sw = 0, sh = 0;
+    let stopped = false;
+
+    function tick() {
+      if (stopped) return;
+      if (videoEl.readyState >= 2) {
+        if (!sw && videoEl.videoWidth) {
+          sw = videoEl.videoWidth;
+          sh = videoEl.videoHeight;
+          canvas.width = sh;
+          canvas.height = sw;
+        }
+        if (sw && sh) {
+          ctx.save();
+          ctx.translate(canvas.width / 2, canvas.height / 2);
+          ctx.rotate(-Math.PI / 2);
+          ctx.drawImage(videoEl, -sw / 2, -sh / 2, sw, sh);
+          ctx.restore();
+        }
+      }
+      requestAnimationFrame(tick);
+    }
+    tick();
+
+    const canvasStream = canvas.captureStream(30);
+    srcStream.getAudioTracks().forEach(t => canvasStream.addTrack(t));
+
+    return {
+      stream: canvasStream,
+      cleanup: () => {
+        stopped = true;
+        videoEl.srcObject = null;
+      },
+    };
+  }
 
   // ──────────────────────────────────────────────────────────────────
   // MediaRecorder mimeType picker (VP9 → VP8 → MP4 H.264 → 기본)
@@ -220,6 +319,32 @@
   }
 
   // ──────────────────────────────────────────────────────────────────
+  // 사용자 제스처에서 fullscreen + orientation lock → 그 다음 카메라 init
+  // (모바일 브라우저는 fullscreen 없이 orientation lock 불가)
+  // ──────────────────────────────────────────────────────────────────
+  async function beginCamera() {
+    // 1. fullscreen 진입 (모바일에선 lock 전제조건)
+    try {
+      const el = document.documentElement;
+      if (el.requestFullscreen) await el.requestFullscreen();
+      else if (el.webkitRequestFullscreen) await el.webkitRequestFullscreen();
+    } catch (e) {
+      console.warn("fullscreen 실패", e);
+    }
+    // 2. 가로 잠금 (iOS Safari는 미지원 → throw 무시)
+    try {
+      if (screen.orientation && screen.orientation.lock) {
+        await screen.orientation.lock("landscape");
+      }
+    } catch (e) {
+      console.warn("orientation lock 실패", e);
+    }
+    // 3. 오버레이 숨기고 카메라 init
+    document.getElementById("startOverlay").classList.add("hidden");
+    await init();
+  }
+
+  // ──────────────────────────────────────────────────────────────────
   // 카메라 초기화 + 미완료 녹화 복구
   // ──────────────────────────────────────────────────────────────────
   async function init() {
@@ -233,6 +358,7 @@
           facingMode: "environment",
           width: { ideal: 1920 },
           height: { ideal: 1080 },
+          aspectRatio: { ideal: 16 / 9, min: 1.5 },
         },
         audio: true,
       });
@@ -280,6 +406,7 @@
     // 새 녹화 시작 전 이전 청크 정리
     try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
     videoBlob = null;
+    streamingState = null;
     document.getElementById("uploadBtn").style.display = "none";
 
     currentMimeType = pickMimeType();
@@ -289,11 +416,23 @@
     };
     if (currentMimeType) options.mimeType = currentMimeType;
 
+    // 스트리밍 업로드 init — 실패 시 녹화 중단하지 않고 폴백 모드(녹화 후 일괄 업로드)로 진행
+    const contentType = baseMime(currentMimeType || "video/webm");
     try {
-      mediaRecorder = new MediaRecorder(stream, options);
+      streamingState = await initStreamingUpload(contentType);
+    } catch (e) {
+      console.warn("스트리밍 업로드 init 실패 — 녹화 후 일괄 업로드로 폴백", e);
+      streamingState = null;
+    }
+
+    recordingPipeline = buildRecordingStream(stream);
+    const recStream = recordingPipeline.stream;
+
+    try {
+      mediaRecorder = new MediaRecorder(recStream, options);
     } catch (e) {
       // 일부 기기는 bitrate 옵션을 거부 → fallback
-      mediaRecorder = new MediaRecorder(stream, currentMimeType ? { mimeType: currentMimeType } : undefined);
+      mediaRecorder = new MediaRecorder(recStream, currentMimeType ? { mimeType: currentMimeType } : undefined);
     }
 
     pendingChunkWrites = 0;
@@ -307,10 +446,41 @@
       } finally {
         pendingChunkWrites--;
       }
+      // 스트리밍 모드면 동시에 업로드 파이프라인에 투입
+      if (streamingState && !streamingState.failed) {
+        streamingFeedChunk(e.data);
+      }
     };
     mediaRecorder.onstop = async () => {
       // ondataavailable이 비동기라 IDB 쓰기 끝날 때까지 대기
       while (pendingChunkWrites > 0) await new Promise(r => setTimeout(r, 50));
+      if (recordingPipeline) {
+        recordingPipeline.cleanup();
+        recordingPipeline = null;
+      }
+
+      // 스트리밍 모드 성공 시: 잔여 flush + complete → 즉시 완료 처리
+      if (streamingState && !streamingState.failed) {
+        try {
+          setStatus("ready", "업로드 마무리 중...");
+          const data = await finalizeStreaming();
+          await fetch(
+            `${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/done?video_url=${encodeURIComponent(data.s3_url || "")}`,
+            { method: "POST" }
+          );
+          try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
+          streamingState = null;
+          hideProgress();
+          setStatus("done", "모든 작업이 완료됐어요!");
+          return;
+        } catch (e) {
+          console.warn("스트리밍 마무리 실패 — 일괄 업로드로 폴백", e);
+          streamingState = null;
+          // 폴백 — 일괄 업로드 UX로
+        }
+      }
+
+      // 폴백 또는 처음부터 비스트리밍 모드
       const stored = await idbGetChunks(String(DB_SESSION_ID));
       const type = baseMime(stored[0]?.mimeType || currentMimeType);
       videoBlob = new Blob(stored.map(c => c.blob), { type });
@@ -321,7 +491,7 @@
     mediaRecorder.start(CHUNK_TIMESLICE_MS);
     recording = true;
     document.getElementById("recordBtn").className = "record-btn recording";
-    setStatus("recording", "녹화 중...");
+    setStatus("recording", streamingState ? "녹화 중 — 실시간 업로드" : "녹화 중...");
 
     fetch(`${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/recording`, { method: "POST" });
 
@@ -349,6 +519,156 @@
   }
   function hideProgress() {
     document.getElementById("progress").style.display = "none";
+  }
+
+  // 녹화된 blob에서 실제 인코딩된 픽셀 크기 읽기 (iOS rotation 함정 회피용)
+  async function getVideoDimensions(blob) {
+    return new Promise((resolve) => {
+      const url = URL.createObjectURL(blob);
+      const v = document.createElement("video");
+      v.muted = true;
+      v.playsInline = true;
+      v.preload = "metadata";
+      v.onloadedmetadata = () => {
+        const dims = { width: v.videoWidth, height: v.videoHeight };
+        URL.revokeObjectURL(url);
+        resolve(dims);
+      };
+      v.onerror = () => {
+        URL.revokeObjectURL(url);
+        resolve({ width: 0, height: 0 });
+      };
+      v.src = url;
+    });
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // 스트리밍 업로드: 녹화 중 발생하는 청크를 partSize(16MB) 단위로 모아 즉시 S3 PUT
+  // 정지 시점엔 잔여분 + complete만 호출하므로 체감 업로드 시간이 거의 0
+  // ──────────────────────────────────────────────────────────────────
+  async function initStreamingUpload(contentType) {
+    const apiBase = `${CONFIG.API_BASE_URL}/api/v1/sessions/${DB_SESSION_ID}/video`;
+    const initRes = await fetch(`${apiBase}/upload/init`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content_type: contentType }), // file_size 미정 → 옵셔널
+    });
+    if (!initRes.ok) throw new Error(`init 실패 (${initRes.status})`);
+    const { upload_id, s3_key, part_size } = await initRes.json();
+
+    return {
+      apiBase,
+      contentType,
+      uploadId: upload_id,
+      s3Key: s3_key,
+      partSize: part_size,
+      buffer: [],          // 미분할 청크들(Blob[])
+      bufferSize: 0,
+      nextPartNumber: 1,
+      pendingPartsQueue: [],  // [{partNumber, blob}, ...]
+      etags: [],           // 완료된 파트들
+      workerActive: false,
+      failed: null,        // 업로드 도중 에러
+      stopRequested: false,
+    };
+  }
+
+  // 버퍼에 청크 누적 → partSize 차면 cut & enqueue → worker 트리거
+  function streamingFeedChunk(chunkBlob) {
+    if (!streamingState || streamingState.failed) return;
+    streamingState.buffer.push(chunkBlob);
+    streamingState.bufferSize += chunkBlob.size;
+
+    while (streamingState.bufferSize >= streamingState.partSize) {
+      streamingCutPart(streamingState.partSize);
+    }
+
+    if (!streamingState.workerActive) streamingStartWorker();
+  }
+
+  // 버퍼에서 targetSize 바이트만큼 잘라 다음 파트로 등록. 잔여는 버퍼에 남김.
+  function streamingCutPart(targetSize) {
+    const combined = new Blob(streamingState.buffer, { type: streamingState.contentType });
+    const actual = Math.min(targetSize, combined.size);
+    const partBlob = combined.slice(0, actual);
+    const remainder = combined.slice(actual);
+    streamingState.buffer = remainder.size > 0 ? [remainder] : [];
+    streamingState.bufferSize = remainder.size;
+
+    const partNumber = streamingState.nextPartNumber++;
+    streamingState.pendingPartsQueue.push({ partNumber, blob: partBlob });
+  }
+
+  // 큐에 쌓인 파트를 순차 업로드 (회선 1개로 충분 — 녹화 0.5MB/s vs 업로드 1MB/s+)
+  async function streamingStartWorker() {
+    if (streamingState.workerActive) return;
+    streamingState.workerActive = true;
+    try {
+      while (streamingState.pendingPartsQueue.length > 0) {
+        const { partNumber, blob } = streamingState.pendingPartsQueue.shift();
+        const urlsRes = await fetch(`${streamingState.apiBase}/upload/part-urls`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            upload_id: streamingState.uploadId,
+            s3_key: streamingState.s3Key,
+            part_numbers: [partNumber],
+          }),
+        });
+        if (!urlsRes.ok) throw new Error(`part-urls 실패 (${urlsRes.status})`);
+        const { urls } = await urlsRes.json();
+        const etag = await putWithRetry(urls[partNumber], blob);
+        streamingState.etags.push({ part_number: partNumber, etag });
+        streamingUpdateUi();
+      }
+    } catch (e) {
+      streamingState.failed = e;
+    } finally {
+      streamingState.workerActive = false;
+    }
+  }
+
+  function streamingUpdateUi() {
+    if (!streamingState) return;
+    const uploadedMb = (streamingState.etags.length * streamingState.partSize / (1024 * 1024)).toFixed(0);
+    const baseText = recording ? "녹화 중 — 업로드" : "업로드 마무리 중";
+    document.getElementById("statusText").textContent = `${baseText} (${uploadedMb}MB 전송)`;
+  }
+
+  // 정지 시 호출 — 잔여 버퍼 flush + 큐 드레인 + /upload/complete
+  async function finalizeStreaming() {
+    if (!streamingState) return null;
+    streamingState.stopRequested = true;
+
+    // 잔여 버퍼를 마지막 파트로 (5MB 미만 OK — S3는 마지막 파트만 예외)
+    if (streamingState.bufferSize > 0) {
+      streamingCutPart(streamingState.bufferSize);
+    }
+    if (!streamingState.workerActive) streamingStartWorker();
+
+    // 큐 드레인 대기
+    while (streamingState.pendingPartsQueue.length > 0 || streamingState.workerActive) {
+      if (streamingState.failed) throw streamingState.failed;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    if (streamingState.failed) throw streamingState.failed;
+
+    if (streamingState.etags.length === 0) {
+      throw new Error("업로드된 파트가 없어요 (녹화 데이터 없음)");
+    }
+
+    // complete
+    const completeRes = await fetch(`${streamingState.apiBase}/upload/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        upload_id: streamingState.uploadId,
+        s3_key: streamingState.s3Key,
+        parts: streamingState.etags.slice().sort((a, b) => a.part_number - b.part_number),
+      }),
+    });
+    if (!completeRes.ok) throw new Error(`complete 실패 (${completeRes.status})`);
+    return await completeRes.json();
   }
 
   async function putWithRetry(url, blob, maxAttempts = 4) {
@@ -386,13 +706,19 @@
 
     try {
       // 1) init
+      const { width: videoWidth, height: videoHeight } = await getVideoDimensions(videoBlob);
+      const initBody = {
+        content_type: contentType,
+        file_size: videoBlob.size,
+      };
+      if (videoWidth > 0 && videoHeight > 0) {
+        initBody.width = videoWidth;
+        initBody.height = videoHeight;
+      }
       const initRes = await fetch(`${apiBase}/upload/init`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          content_type: contentType,
-          file_size: videoBlob.size,
-        }),
+        body: JSON.stringify(initBody),
       });
       if (!initRes.ok) throw new Error(`init 실패 (${initRes.status})`);
       ({ upload_id: uploadId, s3_key: s3Key, part_size: partSize, part_count: partCount } = await initRes.json());
@@ -475,7 +801,11 @@
   }
   function setMsg(t) { document.getElementById("msg").textContent = t; }
 
-  init();
+  // QR로 들어오자마자 자동 init하지 않음 — '촬영 준비' 버튼 탭(=사용자 제스처)으로 시작.
+  // 잘못된 QR이면 오버레이 위로 에러 표시.
+  if (!SESSION_ID || !DB_SESSION_ID) {
+    setStatus("error", "올바르지 않은 QR 코드예요");
+  }
 </script>
 </body>
 </html>
