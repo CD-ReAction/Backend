@@ -150,8 +150,7 @@ class AnalysisCallbackPayload(BaseModel):
 
 class InitUploadRequest(BaseModel):
     content_type: str = Field(..., description="video/webm | video/mp4 | video/quicktime")
-    # 스트리밍 업로드는 녹화 시작 시점에 크기를 모름 → 옵셔널
-    file_size: int | None = Field(default=None, gt=0, description="전체 파일 크기(bytes). 스트리밍은 None")
+    file_size: int = Field(..., gt=0, description="전체 파일 크기(bytes)")
     width: int | None = Field(default=None, gt=0, description="영상 가로 픽셀")
     height: int | None = Field(default=None, gt=0, description="영상 세로 픽셀")
 
@@ -168,8 +167,7 @@ class InitUploadResponse(BaseModel):
     s3_key: str
     video_id: int
     part_size: int
-    # file_size 없이 호출하면 part_count도 미정 → None
-    part_count: int | None = None
+    part_count: int
 
 
 class PartUrlsRequest(BaseModel):
@@ -205,27 +203,21 @@ async def init_video_upload(
     payload: InitUploadRequest,
     db: AsyncSession = Depends(get_db),
 ):
-    """multipart 업로드 시작. Video row 생성/초기화.
-
-    payload.file_size가 주어지면 part_count를 미리 계산해서 반환.
-    스트리밍 업로드(녹화 중 동시 업로드)에선 file_size를 모르므로 None 허용 → part_count도 None 반환.
-    """
+    """multipart 업로드 시작. Video row 생성/초기화."""
     max_bytes = settings.MAX_VIDEO_SIZE_MB * 1024 * 1024
-    part_size = settings.UPLOAD_PART_SIZE_MB * 1024 * 1024
-    part_count: int | None = None
+    if payload.file_size > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"영상이 {settings.MAX_VIDEO_SIZE_MB}MB를 초과해요",
+        )
 
-    if payload.file_size is not None:
-        if payload.file_size > max_bytes:
-            raise HTTPException(
-                status_code=413,
-                detail=f"영상이 {settings.MAX_VIDEO_SIZE_MB}MB를 초과해요",
-            )
-        part_count = math.ceil(payload.file_size / part_size)
-        if part_count > settings.UPLOAD_MAX_PARTS:
-            raise HTTPException(
-                status_code=413,
-                detail=f"파트 수가 {settings.UPLOAD_MAX_PARTS}개를 초과해요",
-            )
+    part_size = settings.UPLOAD_PART_SIZE_MB * 1024 * 1024
+    part_count = math.ceil(payload.file_size / part_size)
+    if part_count > settings.UPLOAD_MAX_PARTS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"파트 수가 {settings.UPLOAD_MAX_PARTS}개를 초과해요",
+        )
 
     # 프로젝트 단위 폴더로 묶기: {project_id}/{session_id}/video.{ext}
     sess_row = await db.execute(select(Session).where(Session.session_id == session_id))
