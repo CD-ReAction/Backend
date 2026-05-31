@@ -8,13 +8,86 @@ actor.py
   - DELETE /actors/{id}                   : 노이즈로 잘못 잡힌 배우 제거 (매핑 화면에서 사용)
 """
 
+import json
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.models.models import Actor, Project, Session
+from app.core.face_analyzer import cap_exemplars
+from app.models.models import Actor, Project, Session, Video
+
+
+def _remap_appearances_in_videos(
+    raw_result: str | None,
+    old_actor_id: int,
+    new_actor_id: int | None,
+) -> tuple[str | None, bool]:
+    """analysis_result(JSON 문자열) 안의 appearances[].person_id 처리.
+
+    - new_actor_id 주어지면: "actor:{old}" → "actor:{new}" 치환 (merge용)
+    - new_actor_id=None: "actor:{old}"인 appearance 항목 제거 (delete용)
+    반환: (수정된 JSON 문자열, 변경 여부). 변경 없으면 원본 그대로.
+    """
+    if not raw_result:
+        return raw_result, False
+    try:
+        data: Any = json.loads(raw_result)
+    except json.JSONDecodeError:
+        return raw_result, False
+    if not isinstance(data, dict):
+        return raw_result, False
+    appearances = data.get("appearances")
+    if not isinstance(appearances, list):
+        return raw_result, False
+
+    old_token = f"actor:{old_actor_id}"
+    changed = False
+
+    if new_actor_id is None:
+        kept = [
+            ap for ap in appearances
+            if not (isinstance(ap, dict) and ap.get("person_id") == old_token)
+        ]
+        if len(kept) != len(appearances):
+            data["appearances"] = kept
+            changed = True
+    else:
+        new_token = f"actor:{new_actor_id}"
+        for ap in appearances:
+            if isinstance(ap, dict) and ap.get("person_id") == old_token:
+                ap["person_id"] = new_token
+                changed = True
+
+    if not changed:
+        return raw_result, False
+    return json.dumps(data, ensure_ascii=False), True
+
+
+async def _rewrite_appearances_for_project(
+    db: AsyncSession,
+    project_id: int,
+    old_actor_id: int,
+    new_actor_id: int | None,
+) -> None:
+    """프로젝트 내 모든 video의 analysis_result에서 actor 참조를 치환/제거."""
+    result = await db.execute(
+        select(Video)
+        .join(Session, Session.session_id == Video.session_id)
+        .where(
+            Session.project_id == project_id,
+            Video.analysis_result.isnot(None),
+        )
+    )
+    for video in result.scalars().all():
+        rewritten, changed = _remap_appearances_in_videos(
+            video.analysis_result, old_actor_id, new_actor_id
+        )
+        if changed:
+            video.analysis_result = rewritten
 
 
 async def _assert_session_creator(db: AsyncSession, session_id: int, user_id: int) -> None:
@@ -138,11 +211,15 @@ async def merge_actor(
     """Actor A(actor_id)를 B(target_actor_id)로 합침. 매칭 화면 컨텍스트 세션의 생성자만 가능.
 
     처리 순서 (UNIQUE(video_id, actor_id) 충돌 회피):
-      1. A의 VideoActor 중 B와 충돌 안 하는 것만 actor_id를 B로 UPDATE
+      1. A의 face_embeddings/thumbnail을 B로 인수인계
+         (A에만 있고 B가 비어있으면 그대로, 둘 다 있으면 union 후 cap)
+      2. A의 VideoActor 중 B와 충돌 안 하는 것만 actor_id를 B로 UPDATE
          (B가 이미 그 video에 링크돼 있으면 UPDATE 안 함 → A 링크는 그대로 남음)
          → is_new_in_video는 B쪽 값 그대로 유지됨 (B 행을 안 건드림)
-      2. A의 남은(=충돌해서 못 옮긴) VideoActor 행 전부 DELETE
-      3. Actor A DELETE
+      3. A의 남은(=충돌해서 못 옮긴) VideoActor 행 전부 DELETE
+      4. 프로젝트 내 모든 video의 analysis_result에서
+         "actor:{A}" → "actor:{B}" 치환 (다시보기 구간 표시 유지)
+      5. Actor A DELETE
     """
     await _assert_session_creator(db, session_id, user_id)
 
@@ -161,7 +238,19 @@ async def merge_actor(
     if src.project_id != dst.project_id:
         raise HTTPException(status_code=400, detail="같은 프로젝트의 배우끼리만 merge 가능해요")
 
-    # 1) 충돌 안 하는 링크만 B로 이전
+    # 1) face_embeddings 인수인계: dst가 비어있으면 src 거 그대로, 둘 다 있으면 union+cap.
+    # 이걸 안 하면 수동 placeholder(dst, embedding NULL)로 merge할 때 src의 임베딩이
+    # 소멸해서 다음 영상부터 같은 사람을 또 새 actor로 잡음 → clustering 실패.
+    src_embeddings = src.face_embeddings or []
+    dst_embeddings = dst.face_embeddings or []
+    if src_embeddings:
+        dst.face_embeddings = cap_exemplars(list(dst_embeddings) + list(src_embeddings))
+
+    # 썸네일도 dst가 비어있을 때만 src 거 가져오기 (라벨링 이후 dst가 더 권위 있음)
+    if not dst.thumbnail_s3_key and src.thumbnail_s3_key:
+        dst.thumbnail_s3_key = src.thumbnail_s3_key
+
+    # 2) 충돌 안 하는 링크만 B로 이전
     await db.execute(text("""
         UPDATE video_actors
         SET actor_id = :dst_id
@@ -171,12 +260,17 @@ async def merge_actor(
           )
     """), {"src_id": actor_id, "dst_id": body.target_actor_id})
 
-    # 2) 남은 A 링크 정리 (B와 같은 video에 둘 다 있었던 경우)
+    # 3) 남은 A 링크 정리 (B와 같은 video에 둘 다 있었던 경우)
     await db.execute(text("""
         DELETE FROM video_actors WHERE actor_id = :src_id
     """), {"src_id": actor_id})
 
-    # 3) A 본인 삭제
+    # 4) 프로젝트 내 영상들의 appearances JSON 치환
+    await _rewrite_appearances_for_project(
+        db, src.project_id, old_actor_id=actor_id, new_actor_id=body.target_actor_id
+    )
+
+    # 5) A 본인 삭제
     await db.execute(text("""
         DELETE FROM actors WHERE actor_id = :src_id
     """), {"src_id": actor_id})
@@ -197,11 +291,17 @@ async def delete_actor(
     """배우 삭제 (analyzer가 노이즈를 얼굴로 잡아 가짜 배우가 생긴 경우 매핑 화면에서 제거).
 
     cascade로 VideoActor / FeedbackActor 링크도 함께 삭제됨.
+    추가로 프로젝트 내 모든 video의 analysis_result에서 해당 actor를 가리키는
+    appearance 항목을 제거 (남겨두면 다시보기에 유령 구간으로 떠 매칭이 깨짐).
     다음 영상 분석에서 같은 얼굴이 다시 잡히면 새 Actor로 등록됨 (= 갤러리 초기화).
     """
     actor = await db.get(Actor, actor_id)
     if not actor:
         raise HTTPException(status_code=404, detail="배우를 찾을 수 없어요")
+
+    await _rewrite_appearances_for_project(
+        db, actor.project_id, old_actor_id=actor_id, new_actor_id=None
+    )
 
     await db.delete(actor)
     await db.commit()
