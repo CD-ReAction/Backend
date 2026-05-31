@@ -236,15 +236,16 @@
   }
 
   // ──────────────────────────────────────────────────────────────────
-  // MediaRecorder mimeType picker (VP9 → VP8 → MP4 H.264 → 기본)
+  // MediaRecorder mimeType picker (MP4 H.264 → VP9 → VP8 → 기본)
+  // Safari는 webm 미지원이라 mp4로 잡히고, Chrome/Firefox는 mp4 미지원이라 webm으로 fallback.
   // ──────────────────────────────────────────────────────────────────
   function pickMimeType() {
     const candidates = [
+      "video/mp4;codecs=h264,aac",
+      "video/mp4",
       "video/webm;codecs=vp9,opus",
       "video/webm;codecs=vp8,opus",
       "video/webm",
-      "video/mp4;codecs=h264,aac",
-      "video/mp4",
     ];
     for (const t of candidates) {
       if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
