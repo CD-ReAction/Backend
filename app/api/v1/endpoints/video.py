@@ -414,6 +414,40 @@ async def get_video(
     }
 
 
+@router.get("/appearances")
+async def get_video_appearances(
+    session_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """다시보기용 actor 등장구간 + actor 목록. 세션 참여자 누구나 호출 가능.
+
+    생성자가 /matching 화면에서 클러스터링(rename/merge 등)을 마친 뒤
+    모든 참여자가 같은 결과를 볼 수 있게 하기 위한 read-only 엔드포인트.
+    """
+    result = await db.execute(select(Video).where(Video.session_id == session_id))
+    video = result.scalar_one_or_none()
+    if not video:
+        raise HTTPException(status_code=404, detail="영상을 찾을 수 없어요")
+
+    link_result = await db.execute(
+        select(VideoActor, Actor)
+        .join(Actor, Actor.actor_id == VideoActor.actor_id)
+        .where(VideoActor.video_id == video.video_id)
+        .order_by(Actor.actor_id)
+    )
+    actors_payload = [
+        _build_actor_response(actor, link.is_new_in_video)
+        for link, actor in link_result.all()
+    ]
+
+    return {
+        "video_id": video.video_id,
+        "analysis_status": video.analysis_status,
+        "analysis_result": _decode_analysis_result(video.analysis_result),
+        "actors": actors_payload,
+    }
+
+
 @router.get("/matching")
 async def get_video_matching(
     session_id: int,
