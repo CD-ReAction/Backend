@@ -30,7 +30,7 @@ from sqlalchemy import delete, select, text
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.core.face_analyzer import request_face_analysis
+from app.core.face_analyzer import cap_exemplars, request_face_analysis
 from app.core.s3 import (
     abort_multipart_upload,
     complete_multipart_upload,
@@ -48,17 +48,6 @@ ALLOWED_MIME = {
     "video/quicktime": "mov",
     "video/webm": "webm",
 }
-
-# actor 갤러리 cap — 초과 시 oldest exemplar drop
-GALLERY_CAP_PER_ACTOR = 20
-
-
-def _cap_exemplars(exemplars: list[list[float]]) -> list[list[float]]:
-    """초과 시 가장 오래된(앞쪽) exemplar 제거. append 순서 = 시간 순."""
-    if len(exemplars) > GALLERY_CAP_PER_ACTOR:
-        return exemplars[-GALLERY_CAP_PER_ACTOR:]
-    return exemplars
-
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 공용 헬퍼
@@ -584,7 +573,7 @@ async def update_analysis_result(
         # 갤러리에 새 exemplar append (cap 초과 시 oldest drop).
         # 링크가 이미 있는 경우(재분석 등)에도 갤러리는 갱신.
         if m.new_exemplars:
-            actor.face_embeddings = _cap_exemplars(
+            actor.face_embeddings = cap_exemplars(
                 list(actor.face_embeddings or []) + m.new_exemplars
             )
 
@@ -612,7 +601,7 @@ async def update_analysis_result(
         actor = Actor(
             project_id=project_id,
             name=None,
-            face_embeddings=_cap_exemplars(list(c.face_embeddings)),
+            face_embeddings=cap_exemplars(list(c.face_embeddings)),
             thumbnail_s3_key=c.thumbnail_s3_key,
         )
         db.add(actor)

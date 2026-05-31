@@ -7,6 +7,16 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+# actor 갤러리 cap — 초과 시 oldest exemplar drop.
+# append 순서 = 시간 순이라 가정하고 뒤쪽 N개 유지.
+GALLERY_CAP_PER_ACTOR = 20
+
+
+def cap_exemplars(exemplars: list[list[float]]) -> list[list[float]]:
+    if len(exemplars) > GALLERY_CAP_PER_ACTOR:
+        return exemplars[-GALLERY_CAP_PER_ACTOR:]
+    return exemplars
+
 
 def _callback_url() -> str | None:
     if not settings.PUBLIC_API_BASE_URL:
