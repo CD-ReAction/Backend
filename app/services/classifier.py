@@ -51,5 +51,5 @@ def extract_tags(result: dict) -> list[dict]:
     for unit in units:
         add("priority", unit["priority"])
         for c in unit["categories"]:
-            add("category", f"{c['main']}:{c['sub']}")
+            add("category", c["main"])  # ← sub 제거, main만 저장
     return tags
