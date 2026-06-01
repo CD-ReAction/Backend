@@ -408,10 +408,13 @@ async def delete_feedback(
 @router.post("/classify")
 async def classify_session_feedbacks(
     session_id: int,
+    force: bool = Query(default=False, description="이미 분류된 피드백도 재분류"),
+
     db: AsyncSession = Depends(get_db),
 ):
     """이 세션의 미분류 피드백을 일괄 분류"""
     return await classify_unclassified(db, session_id=session_id, limit=50)
+
 
 
 @router.post("/{feedback_id}/classify")
@@ -441,3 +444,4 @@ async def get_feedback_tags(
         "priority": [t.tag_value for t in tags if t.tag_type == "priority"],
         "categories": [t.tag_value for t in tags if t.tag_type == "category"],
     }
+
