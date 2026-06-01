@@ -53,6 +53,8 @@
 ### 4. 제스처 (gesture)
 
 몸짓, 자세, 잔발, 소품 처리 등 신체 디테일 전반.
+**주의**: 소품 사용 방식에 관한 피드백은 감정 표현과 무관하더라도 gesture:props 단독 분류.
+acting과 중복 분류하지 않는다. 예: "인형으로 얼굴 가리지 말기" → gesture:props만.
 
 - gesture: 제스처, 손짓, 팔 동작
 - posture: 자세, 앉기/서기 자세
@@ -173,6 +175,7 @@
 - **정도 표현 + 변경 요구**: "좀 더 터벅터벅", "조금 더 크게" 등 행동 변경을 요구하는 경우 required.
   상대방이 선택할 여지를 주는 제안("좀 더 크게 하는 게 어때요?")과 구분할 것.
 - **확신형 질문**: "~인 것 같은데", "~안 됐나요" 형태여도 화자가 문제를 사실상 확신하고 지적하는 경우 required.
+- **공간적 이동 요구**: "앞으로 조금만 더", "뒤로 살짝" 등 무대 위치 변경 요구는 정도 표현과 무관하게 required.
 
 ### 판단 트릭
 
@@ -383,28 +386,61 @@ confidence는 주관이 아닌 다음 기준으로 부여:
 
 ==================================================
 
+모든 필드값은 영어로 출력합니다. (summary, reason 포함)
+categories의 sub 필드는 출력하지 않습니다.
+tags는 대분류(main) 중복 제거 후 배열로 제공합니다. meta 계열은 소분류 무관하게 "meta"로 통일합니다.
+
 ### 단일 분류 (is_split: false)
 
 {
-  "feedback_text": "<원본>",
+  "feedback_text": "<원본 한국어 텍스트>",
   "is_split": false,
-  "actors": ["<인물1>", ...],
-  "scenes": ["<장면1>", ...],
+  "actors": ["<name>", ...],
+  "scenes": ["<scene>", ...],
+  "tags": ["<main_en>", ...],
   "categories": [
     {
-      "main": "<대분류 EN>",
-      "main_kr": "<대분류 KR>",
-      "sub": "<소분류 EN>",
-      "is_primary": <true|false>,
-      "confidence": <0.0~1.0>,
-      "reason": "<한 줄 근거>"
+      "main": "vocal|acting|movement|gesture|sync|text|meta",
+      "is_primary": true|false,
+      "confidence": 0.0~1.0,
+      "reason": "<one-line reason in English>"
     }
   ],
   "priority": "required|recommended|discussion|praise",
-  "priority_confidence": <0.0~1.0>,
-  "priority_signals": ["<신호 유형 + 인용>", ...],
-  "actionability": <0.0~1.0>,
-  "summary": "<핵심 한 문장 요약>"
+  "priority_confidence": 0.0~1.0,
+  "priority_signals": ["<signal type + quote>", ...],
+  "actionability": 0.0~1.0,
+  "summary": "<key summary in one sentence in English>"
+}
+
+### 분할 분류 (is_split: true)
+
+{
+  "feedback_text": "<원본 한국어 텍스트>",
+  "is_split": true,
+  "priority": "<highest priority among segments>",
+  "segments": [
+    {
+      "text": "<split portion>",
+      "actors": [...],
+      "scenes": [...],
+      "tags": ["<main_en>", ...],
+      "categories": [
+        {
+          "main": "vocal|acting|movement|gesture|sync|text|meta",
+          "is_primary": true|false,
+          "confidence": 0.0~1.0,
+          "reason": "<one-line reason in English>"
+        }
+      ],
+      "priority": "required|recommended|discussion|praise",
+      "priority_confidence": 0.0~1.0,
+      "priority_signals": [...],
+      "actionability": 0.0~1.0,
+      "summary": "<segment summary in English>"
+    }
+  ],
+  "overall_summary": "<overall one-line summary in English>"
 }
 
 ### 분할 분류 (is_split: true)
@@ -443,7 +479,7 @@ confidence는 주관이 아닌 다음 기준으로 부여:
 
 ==================================================
 
-### 예시 1 — acting:improvisation / required / is_split: false
+### 예시 1 — acting / required / is_split: false
 
 입력: "연희 애드리브 할 때 돈내고 해라"
 
@@ -452,26 +488,25 @@ confidence는 주관이 아닌 다음 기준으로 부여:
   "is_split": false,
   "actors": ["연희"],
   "scenes": [],
+  "tags": ["acting"],
   "categories": [
     {
       "main": "acting",
-      "main_kr": "연기",
-      "sub": "improvisation",
       "is_primary": true,
       "confidence": 0.95,
-      "reason": "애드리브 즉흥 연기 과도함에 대한 직접적 지적"
+      "reason": "Direct criticism of excessive improvisation during performance"
     }
   ],
   "priority": "required",
   "priority_confidence": 0.95,
-  "priority_signals": ["명령형 어미 '해라'"],
+  "priority_signals": ["Imperative ending '해라'"],
   "actionability": 0.9,
-  "summary": "연희의 과도한 애드리브 자제 요구"
+  "summary": "Yeonhee must restrain excessive ad-lib and improvisation"
 }
 
 ---
 
-### 예시 2 — acting:emotion / discussion / is_split: false
+### 예시 2 — acting / discussion / is_split: false
 
 입력: "좀 더 슬픈 톤으로 가자고 했던 것 같은데"
 
@@ -480,143 +515,130 @@ confidence는 주관이 아닌 다음 기준으로 부여:
   "is_split": false,
   "actors": [],
   "scenes": [],
+  "tags": ["acting"],
   "categories": [
     {
       "main": "acting",
-      "main_kr": "연기",
-      "sub": "emotion",
       "is_primary": true,
       "confidence": 0.85,
-      "reason": "슬픈 톤 방향에 대한 감정선 조정 언급"
+      "reason": "Refers to emotional tone direction, but speaker is uncertain about prior agreement"
     }
   ],
   "priority": "discussion",
   "priority_confidence": 0.8,
-  "priority_signals": ["화자 기억 불확실 '했던 것 같은데'", "결론 미확정"],
+  "priority_signals": ["Uncertain recall '했던 것 같은데'", "No confirmed conclusion"],
   "actionability": 0.3,
-  "summary": "슬픈 감정 톤 방향 합의 여부 재확인 필요"
+  "summary": "Need to confirm whether a sadder emotional tone was previously agreed upon"
 }
 
 ---
 
-### 예시 3 — gesture:footwork + acting:reaction / required / is_split: true
+### 예시 3 — gesture + acting / required / is_split: true
 
 입력: "제르비스 들어올때 좀 더 터벅터벅 그리고 바로 제루샤 얼굴 보면서 깜짝 놀라줘야해요"
 
 {
   "feedback_text": "제르비스 들어올때 좀 더 터벅터벅 그리고 바로 제루샤 얼굴 보면서 깜짝 놀라줘야해요",
   "is_split": true,
+  "priority": "required",
   "segments": [
     {
       "text": "제르비스 들어올때 좀 더 터벅터벅",
       "actors": ["제르비스"],
       "scenes": [],
+      "tags": ["gesture", "movement"],
       "categories": [
         {
           "main": "gesture",
-          "main_kr": "제스처",
-          "sub": "footwork",
           "is_primary": true,
           "confidence": 0.9,
-          "reason": "터벅터벅은 걸음 스타일 — gesture:footwork"
+          "reason": "Shuffling walk style is a footwork issue, not a position issue"
         },
         {
           "main": "movement",
-          "main_kr": "동선",
-          "sub": "entrance_exit",
           "is_primary": false,
           "confidence": 0.7,
-          "reason": "들어올 때라는 등장 맥락 포함"
+          "reason": "Entrance context implied"
         }
       ],
       "priority": "required",
       "priority_confidence": 0.85,
-      "priority_signals": ["변경 요구 '좀 더 터벅터벅' — 상대방 선택 여지 없는 행동 변경 요구"],
+      "priority_signals": ["Spatial action demand '좀 더 터벅터벅' — no choice given to performer"],
       "actionability": 0.9,
-      "summary": "제르비스 등장 시 걸음을 더 터벅터벅하게 변경 요구"
+      "summary": "Jerbis must enter with a heavier, more shuffling walk"
     },
     {
       "text": "바로 제루샤 얼굴 보면서 깜짝 놀라줘야해요",
       "actors": ["제르비스", "제루샤"],
       "scenes": [],
+      "tags": ["acting"],
       "categories": [
         {
           "main": "acting",
-          "main_kr": "연기",
-          "sub": "reaction",
           "is_primary": true,
           "confidence": 0.95,
-          "reason": "제루샤를 보고 놀라는 리액션 요구"
-        },
-        {
-          "main": "acting",
-          "main_kr": "연기",
-          "sub": "gaze",
-          "is_primary": false,
-          "confidence": 0.8,
-          "reason": "제루샤 얼굴을 보는 시선 처리 포함"
+          "reason": "Required reaction of surprise upon seeing Jerusha"
         }
       ],
       "priority": "required",
       "priority_confidence": 0.9,
-      "priority_signals": ["명령형 어미 '줘야해요'"],
+      "priority_signals": ["Obligatory ending '줘야해요'"],
       "actionability": 0.95,
-      "summary": "제르비스가 제루샤를 보고 깜짝 놀라는 리액션 필수"
+      "summary": "Jerbis must immediately look at Jerusha's face and react with surprise"
     }
   ],
-  "overall_summary": "제르비스 등장 시 걸음새 및 제루샤를 향한 리액션 변경 요구"
+  "overall_summary": "Jerbis must enter with a heavier walk and react with surprise upon seeing Jerusha"
 }
 
 ---
 
-### 예시 4 — acting:emotion + text:memorization / required / is_split: true
+### 예시 4 — acting + text / required / is_split: true
 
 입력: "좀 더 다정하게 불러주고 이 부분 대사 바뀐것같은데 암기 안됐나요"
 
 {
   "feedback_text": "좀 더 다정하게 불러주고 이 부분 대사 바뀐것같은데 암기 안됐나요",
   "is_split": true,
+  "priority": "required",
   "segments": [
     {
       "text": "좀 더 다정하게 불러주고",
       "actors": [],
       "scenes": [],
+      "tags": ["acting"],
       "categories": [
         {
           "main": "acting",
-          "main_kr": "연기",
-          "sub": "emotion",
           "is_primary": true,
           "confidence": 0.8,
-          "reason": "다정하게라는 감정 톤 변경 요구"
+          "reason": "Demand to shift emotional tone to a warmer, more affectionate delivery"
         }
       ],
       "priority": "required",
       "priority_confidence": 0.85,
-      "priority_signals": ["변경 요구 '좀 더 다정하게 불러주고' — 상대방 선택 여지 없는 행동 변경 요구"],
+      "priority_signals": ["Action demand '좀 더 다정하게 불러주고' — no choice given to performer"],
       "actionability": 0.8,
-      "summary": "감정 톤을 더 다정하게 변경 요구"
+      "summary": "Must deliver the line with a warmer, more affectionate tone"
     },
     {
       "text": "이 부분 대사 바뀐것같은데 암기 안됐나요",
       "actors": [],
       "scenes": [],
+      "tags": ["text"],
       "categories": [
         {
           "main": "text",
-          "main_kr": "암기",
-          "sub": "memorization",
           "is_primary": true,
           "confidence": 0.9,
-          "reason": "변경된 대사 암기 여부 확인 — 화자 확신에 가까운 문제 지적"
+          "reason": "Speaker is effectively certain the line changed and memorization is incomplete"
         }
       ],
       "priority": "required",
       "priority_confidence": 0.8,
-      "priority_signals": ["확신형 질문 '바뀐것같은데 암기 안됐나요' — 형식은 질문이나 화자가 문제를 사실상 확신"],
+      "priority_signals": ["Confident assertion disguised as question '바뀐것같은데 암기 안됐나요'"],
       "actionability": 0.9,
-      "summary": "변경된 대사 암기 미완료 지적"
+      "summary": "Updated line has not been memorized — must be fixed before next rehearsal"
     }
   ],
-  "overall_summary": "감정 톤 조정 및 변경된 대사 암기 요구"
+  "overall_summary": "Must deliver with warmer tone and memorize the updated line"
 }
