@@ -11,7 +11,7 @@ app = FastAPI(title="Re:Action API", version="1.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://cau-cd-reaction.vercel.app/",
+        "https://cau-cd-reaction.vercel.app",
         "https://reaction-camera-connection.netlify.app",
         "http://localhost:5173",
         "http://localhost:3000",
