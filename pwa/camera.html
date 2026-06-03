@@ -157,6 +157,7 @@
   const TARGET_VIDEO_BPS = 4_000_000;
   const TARGET_AUDIO_BPS = 128_000;
   // 5초 단위 청크 → 끊겨도 5초 이내 손실, IndexedDB로 백업
+  // (메타데이터는 RunPod analyzer에서 ffmpeg remux로 정상화)
   const CHUNK_TIMESLICE_MS = 5000;
   // 업로드 파트 크기: 백엔드 UPLOAD_PART_SIZE_MB (16MB) 와 일치시킴
   const UPLOAD_PART_SIZE = 16 * 1024 * 1024;
