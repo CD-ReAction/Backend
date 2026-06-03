@@ -26,7 +26,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select
 
 from app.core.database import get_db
 from app.core.config import settings
@@ -520,7 +520,7 @@ async def analyze_existing_video(
         "s3_url": video.s3_url,
         "analysis_status": video.analysis_status,
     }
-
+ㅇ
 
 @analysis_router.post("/analysis-callback")
 async def update_analysis_result(
@@ -533,7 +533,6 @@ async def update_analysis_result(
     1. matched[] → VideoActor 링크만 추가 (썸네일/임베딩 갱신 안 함, 결정 1·2)
     2. new_candidates[] → Actor INSERT → flush로 actor_id 얻고 → name="배우 {id}"
     3. analysis_result.appearances[]의 "new:{idx}" → "actor:{id}" 치환
-    4. 고아 actor (어떤 video에도 안 링크된 actor) 정리
     """
     if settings.FACE_ANALYZER_SECRET and x_analyzer_secret != settings.FACE_ANALYZER_SECRET:
         raise HTTPException(status_code=401, detail="invalid analyzer secret")
@@ -635,16 +634,6 @@ async def update_analysis_result(
         video.analysis_result = json.dumps(result_payload, ensure_ascii=False)
 
     await db.flush()
-
-    # 4) 고아 actor 정리: 분석에서 만들어졌다가 어떤 video_actors에도 안 묶인 actor만 삭제.
-    # face_embeddings가 NULL인 placeholder(수동 등록)는 보존.
-    await db.execute(text("""
-        DELETE FROM actors
-        WHERE project_id = :pid
-          AND face_embeddings IS NOT NULL
-          AND actor_id NOT IN (SELECT DISTINCT actor_id FROM video_actors)
-    """), {"pid": project_id})
-
     await db.commit()
 
     return {

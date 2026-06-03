@@ -59,6 +59,7 @@ async def request_face_analysis(
         "input": {
             "video_id": video_id,
             "session_id": session_id,
+            "s3_bucket": settings.S3_BUCKET_NAME,
             "s3_key": s3_key,
             "s3_url": s3_url,
             "callback_url": callback_url,
