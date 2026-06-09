@@ -520,7 +520,7 @@ async def analyze_existing_video(
         "s3_url": video.s3_url,
         "analysis_status": video.analysis_status,
     }
-ㅇ
+
 
 @analysis_router.post("/analysis-callback")
 async def update_analysis_result(
