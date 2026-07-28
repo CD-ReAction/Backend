@@ -120,10 +120,25 @@ class RealtimeManager:
 
     @staticmethod
     def _matches(conn: _Connection, project_id: int | None, session_id: int | None) -> bool:
+        """구독 scope와 이벤트 scope 비교.
+
+        어느 한쪽 필드가 None이면 그 필드는 와일드카드:
+        - 구독이 project만 지정 → 그 프로젝트의 모든 세션 이벤트 수신
+        - 이벤트가 project 레벨(session_id=None, 예: actor.*) → 그 프로젝트의
+          모든 세션 구독자에게 전달
+        """
         for sub_project, sub_session in conn.scopes:
-            if sub_project is not None and sub_project != project_id:
+            if (
+                sub_project is not None
+                and project_id is not None
+                and sub_project != project_id
+            ):
                 continue
-            if sub_session is not None and sub_session != session_id:
+            if (
+                sub_session is not None
+                and session_id is not None
+                and sub_session != session_id
+            ):
                 continue
             return True
         return False
