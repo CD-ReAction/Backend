@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.database import engine, Base
 from app.api import ws
 from app.api.v1.endpoints import actor, camera_session, video, feedback, project, auth
+from app.api.v2.endpoints import feedback as feedback_v2, script as script_v2
 
 app = FastAPI(title="Re:Action API", version="1.0.0")
 
@@ -33,6 +34,12 @@ app.include_router(project.router, prefix=API_PREFIX)
 app.include_router(actor.router, prefix=API_PREFIX)
 app.include_router(actor.project_router, prefix=API_PREFIX)
 app.include_router(actor.session_router, prefix=API_PREFIX)
+
+# v2: 대본(PDF) 기반 플로우 (대본 없는 프로젝트는 기존 v1 사용 — UI 분기)
+API_V2_PREFIX = "/api/v2"
+app.include_router(script_v2.router, prefix=API_V2_PREFIX)
+app.include_router(feedback_v2.router, prefix=API_V2_PREFIX)
+app.include_router(feedback_v2.project_router, prefix=API_V2_PREFIX)
 
 # WebSocket (프론트 VITE_WS_URL → ws(s)://<host>/ws, API_PREFIX 없이 루트에 마운트)
 app.include_router(ws.router)

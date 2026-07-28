@@ -8,7 +8,7 @@ from sqlalchemy import select
 
 from app.core.database import get_db
 from app.core.realtime import manager
-from app.models.models import Project, ProjectMember, Session, SessionCategory, ProjectLike
+from app.models.models import Project, ProjectMember, Script, Session, SessionCategory, ProjectLike
 
 
 
@@ -29,6 +29,8 @@ class ProjectOut(BaseModel):
     description: Optional[str]
     join_code: str
     created_at: str
+    # 대본(PDF) 업로드 여부 — scripts 테이블에서 계산 (프론트 UI 분기용)
+    has_script: bool = False
 
 
 class JoinRequest(BaseModel):
@@ -54,14 +56,25 @@ class SessionOut(BaseModel):
 
 # ── 헬퍼 ────────────────────────────────────────────────
 
-def _project_to_out(p: Project) -> ProjectOut:
+def _project_to_out(p: Project, has_script: bool = False) -> ProjectOut:
     return ProjectOut(
         project_id=p.project_id,
         title=p.title,
         description=p.description,
         join_code=p.join_code,
         created_at=p.created_at.isoformat(),
+        has_script=has_script,
     )
+
+
+async def _script_project_ids(db: AsyncSession, project_ids: List[int]) -> set[int]:
+    """대본이 업로드된 project_id 집합 (목록 응답용 일괄 조회)"""
+    if not project_ids:
+        return set()
+    res = await db.execute(
+        select(Script.project_id).where(Script.project_id.in_(project_ids))
+    )
+    return {r[0] for r in res.all()}
 
 
 # ── 프로젝트 엔드포인트 ──────────────────────────────────
@@ -112,7 +125,8 @@ async def get_my_projects(
         .order_by(Project.created_at.desc())
     )
     projects = result.scalars().all()
-    return [_project_to_out(p) for p in projects]
+    with_script = await _script_project_ids(db, [p.project_id for p in projects])
+    return [_project_to_out(p, p.project_id in with_script) for p in projects]
 
 
 @router.post("/join", response_model=ProjectOut)
@@ -149,7 +163,8 @@ async def join_project(
     ))
     await db.flush()
 
-    return _project_to_out(project)
+    with_script = await _script_project_ids(db, [project.project_id])
+    return _project_to_out(project, project.project_id in with_script)
 
 
 # ── 세션 엔드포인트 ──────────────────────────────────────
@@ -356,4 +371,5 @@ async def get_liked_projects(
         .order_by(ProjectLike.created_at.desc())
     )
     projects = result.scalars().all()
-    return [_project_to_out(p) for p in projects]
+    with_script = await _script_project_ids(db, [p.project_id for p in projects])
+    return [_project_to_out(p, p.project_id in with_script) for p in projects]
