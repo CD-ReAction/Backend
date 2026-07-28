@@ -19,7 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.models.models import CameraSession
+from app.core.realtime import manager
+from app.models.models import CameraSession, Session
 
 router = APIRouter(prefix="/camera-session", tags=["camera-session"])
 
@@ -96,6 +97,39 @@ async def _create_new_session(
     return s
 
 
+async def _broadcast_camera_status(db: AsyncSession, s: CameraSession) -> None:
+    """상태 변경 commit 후 camera.status.changed 이벤트 broadcast.
+
+    scope의 session_id는 DB sessions.session_id (= db_session_id),
+    payload의 session_id는 camera_session id (프론트 계약).
+    """
+    res = await db.execute(
+        select(Session.project_id).where(Session.session_id == s.db_session_id)
+    )
+    project_id = res.scalar_one_or_none()
+
+    recording_elapsed_seconds = None
+    if s.status == "recording" and s.recording_started_at:
+        recording_elapsed_seconds = max(
+            0,
+            int((datetime.utcnow() - s.recording_started_at).total_seconds()),
+        )
+
+    await manager.broadcast(
+        "camera.status.changed",
+        project_id,
+        s.db_session_id,
+        {
+            "session_id": s.id,
+            "status": s.status,
+            "connected_at": _utc_iso(s.connected_at),
+            "recording_started_at": _utc_iso(s.recording_started_at),
+            "recording_elapsed_seconds": recording_elapsed_seconds,
+            "video_url": s.video_url,
+        },
+    )
+
+
 # ── 엔드포인트 ───────────────────────────────────────────
 
 @router.post("/create", response_model=CameraSessionResponse)
@@ -170,6 +204,7 @@ async def get_camera_session_status(
     if s.status != "expired" and now > s.expires_at:
         s.status = "expired"
         await db.commit()
+        await _broadcast_camera_status(db, s)
 
     recording_elapsed_seconds = None
     if s.status == "recording" and s.recording_started_at:
@@ -198,6 +233,7 @@ async def mark_connected(
     s.status = "connect"
     s.connected_at = datetime.utcnow()
     await db.commit()
+    await _broadcast_camera_status(db, s)
     return {"ok": True, "status": "connect"}
 
 
@@ -212,6 +248,7 @@ async def mark_recording(
     s.recording_started_at = datetime.utcnow()
     s.video_url = None
     await db.commit()
+    await _broadcast_camera_status(db, s)
     return {
         "ok": True,
         "status": "recording",
@@ -228,6 +265,7 @@ async def mark_stop(
     s = await _get_session(session_id, db)
     s.status = "end"
     await db.commit()
+    await _broadcast_camera_status(db, s)
     return {"ok": True, "status": "end"}
 
 
@@ -242,4 +280,5 @@ async def mark_done(
     s.status = "done"
     s.video_url = video_url
     await db.commit()
+    await _broadcast_camera_status(db, s)
     return {"ok": True, "status": "done"}

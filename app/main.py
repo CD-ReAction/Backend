@@ -2,6 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.core.database import engine, Base
+from app.api import ws
 from app.api.v1.endpoints import actor, camera_session, video, feedback, project, auth
 
 app = FastAPI(title="Re:Action API", version="1.0.0")
@@ -32,6 +33,9 @@ app.include_router(project.router, prefix=API_PREFIX)
 app.include_router(actor.router, prefix=API_PREFIX)
 app.include_router(actor.project_router, prefix=API_PREFIX)
 app.include_router(actor.session_router, prefix=API_PREFIX)
+
+# WebSocket (프론트 VITE_WS_URL → ws(s)://<host>/ws, API_PREFIX 없이 루트에 마운트)
+app.include_router(ws.router)
 
 
 @app.on_event("startup")

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
+from app.core.realtime import manager
 from app.models.models import Project, ProjectMember, Session, SessionCategory, ProjectLike
 
 
@@ -172,6 +173,25 @@ async def create_session(
     db.add(session)
     await db.flush()
 
+    # commit 후 broadcast (payload는 commit된 DB 상태)
+    await db.commit()
+    await manager.broadcast(
+        "session.created",
+        session.project_id,
+        session.session_id,
+        {
+            "session_id": session.session_id,
+            "project_id": session.project_id,
+            "title": session.title,
+            "s_category": session.s_category.value,
+            "created_at": f"{session.created_at.isoformat()}Z",
+            "in_progress": session.in_progress,
+            "matching_completed": session.matching_completed,
+            "user_id": session.created_by_user_id,
+            "owner_id": session.created_by_user_id,
+        },
+    )
+
     return SessionOut(
         session_id=session.session_id,
         s_category=session.s_category,
@@ -260,6 +280,19 @@ async def start_rehearsal(
         session.rehearsal_started = True
         session.rehearsal_started_at = datetime.utcnow()
         await db.commit()
+        await manager.broadcast(
+            "session.status.changed",
+            session.project_id,
+            session.session_id,
+            {
+                "session_id": session.session_id,
+                "project_id": session.project_id,
+                "in_progress": session.in_progress,
+                "matching_completed": session.matching_completed,
+                "rehearsal_started": session.rehearsal_started,
+                "rehearsal_started_at": f"{session.rehearsal_started_at.isoformat()}Z",
+            },
+        )
 
     return {
         "db_session_id": session_id,

@@ -12,7 +12,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from app.core.database import get_db
-from app.models.models import Actor, Feedback, FeedbackActor, FeedbackTag
+from app.core.realtime import manager
+from app.models.models import Actor, Feedback, FeedbackActor, FeedbackTag, Session
 
 from app.services.feedback_classify import classify_unclassified, classify_one
 
@@ -59,6 +60,41 @@ class FeedbackWithTags(BaseModel):
     categories: List[str]    # 예: ["acting:tone", "acting:expression"]
 
 
+# ── 실시간 broadcast 헬퍼 ────────────────────────────────
+
+async def _project_id_of_session(db: AsyncSession, session_id: int) -> Optional[int]:
+    res = await db.execute(
+        select(Session.project_id).where(Session.session_id == session_id)
+    )
+    return res.scalar_one_or_none()
+
+
+async def _actor_names(db: AsyncSession, actor_ids: List[int]) -> List[str]:
+    """actor_ids 순서대로 이름 반환. name이 null이면 '배우 {id}' fallback"""
+    if not actor_ids:
+        return []
+    res = await db.execute(
+        select(Actor.actor_id, Actor.name).where(Actor.actor_id.in_(actor_ids))
+    )
+    names = {aid: name for aid, name in res.all()}
+    return [names.get(aid) or f"배우 {aid}" for aid in actor_ids]
+
+
+def _feedback_event_payload(
+    feedback: Feedback, actor_ids: List[int], actor_names: List[str]
+) -> dict:
+    return {
+        "feedback_id": feedback.feedback_id,
+        "session_id": feedback.session_id,
+        "created_by_user_id": feedback.created_by_user_id,
+        "content": feedback.content,
+        "video_offset_seconds": feedback.video_offset_seconds,
+        "actor_ids": actor_ids,
+        "actor_names": actor_names,
+        "created_at": f"{feedback.created_at.isoformat()}Z",
+    }
+
+
 # ── 엔드포인트 ───────────────────────────────────────────
 
 @router.post("", response_model=FeedbackOut, status_code=201)
@@ -93,6 +129,17 @@ async def create_feedback(
         for aid in actor_ids:
             db.add(FeedbackActor(feedback_id=feedback.feedback_id, actor_id=aid))
         await db.flush()
+
+    # commit 후 broadcast (payload는 commit된 DB 상태)
+    project_id = await _project_id_of_session(db, session_id)
+    actor_names = await _actor_names(db, actor_ids)
+    await db.commit()
+    await manager.broadcast(
+        "feedback.created",
+        project_id,
+        session_id,
+        _feedback_event_payload(feedback, actor_ids, actor_names),
+    )
 
     return FeedbackOut(
         feedback_id=feedback.feedback_id,
@@ -368,6 +415,18 @@ async def update_feedback(
     await db.refresh(feedback)
 
     actors_by_feedback = await _load_actor_ids(db, [feedback_id])
+    final_actor_ids = actors_by_feedback.get(feedback_id, [])
+
+    # commit 후 broadcast (payload는 commit된 DB 상태)
+    project_id = await _project_id_of_session(db, session_id)
+    actor_names = await _actor_names(db, final_actor_ids)
+    await db.commit()
+    await manager.broadcast(
+        "feedback.updated",
+        project_id,
+        session_id,
+        _feedback_event_payload(feedback, final_actor_ids, actor_names),
+    )
 
     return FeedbackOut(
         feedback_id=feedback.feedback_id,
@@ -375,7 +434,7 @@ async def update_feedback(
         created_by_user_id=feedback.created_by_user_id,
         content=feedback.content,
         video_offset_seconds=feedback.video_offset_seconds,
-        actor_ids=actors_by_feedback.get(feedback_id, []),
+        actor_ids=final_actor_ids,
         created_at=feedback.created_at.isoformat(),
     )
 
@@ -401,7 +460,20 @@ async def delete_feedback(
     if feedback.created_by_user_id != user_id:
         raise HTTPException(status_code=403, detail="작성자만 삭제할 수 있어요")
 
+    project_id = await _project_id_of_session(db, session_id)
     await db.delete(feedback)
+    await db.commit()
+
+    await manager.broadcast(
+        "feedback.deleted",
+        project_id,
+        session_id,
+        {
+            "session_id": session_id,
+            "feedback_id": feedback_id,
+            "deleted_by_user_id": user_id,
+        },
+    )
 
 
 

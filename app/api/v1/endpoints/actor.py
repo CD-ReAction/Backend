@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.face_analyzer import cap_exemplars
+from app.core.realtime import manager
 from app.models.models import Actor, Project, Session, Video
 
 
@@ -139,6 +140,17 @@ async def create_actor(
     await db.flush()
     await db.commit()
 
+    await manager.broadcast(
+        "actor.created",
+        project_id,
+        None,  # project 레벨 이벤트 — 프로젝트 내 모든 세션 구독자에게 전달
+        {
+            "actor_id": actor.actor_id,
+            "project_id": actor.project_id,
+            "name": actor.name,
+        },
+    )
+
     return {
         "actor_id": actor.actor_id,
         "project_id": actor.project_id,
@@ -193,6 +205,17 @@ async def rename_actor(
     actor.name = body.name.strip()
     await db.flush()
     await db.commit()
+
+    await manager.broadcast(
+        "actor.updated",
+        actor.project_id,
+        None,
+        {
+            "actor_id": actor.actor_id,
+            "project_id": actor.project_id,
+            "name": actor.name,
+        },
+    )
 
     return {
         "actor_id": actor.actor_id,
@@ -277,6 +300,18 @@ async def merge_actor(
 
     await db.commit()
 
+    await manager.broadcast(
+        "actor.merged",
+        dst.project_id,
+        None,
+        {
+            "merged_from": actor_id,
+            "merged_into": body.target_actor_id,
+            "project_id": dst.project_id,
+            "name": dst.name,
+        },
+    )
+
     return {
         "merged_from": actor_id,
         "merged_into": body.target_actor_id,
@@ -303,8 +338,19 @@ async def delete_actor(
         db, actor.project_id, old_actor_id=actor_id, new_actor_id=None
     )
 
+    project_id = actor.project_id
     await db.delete(actor)
     await db.commit()
+
+    await manager.broadcast(
+        "actor.deleted",
+        project_id,
+        None,
+        {
+            "actor_id": actor_id,
+            "project_id": project_id,
+        },
+    )
 
     return {"deleted_actor_id": actor_id}
 
@@ -329,6 +375,18 @@ async def complete_matching(
 
     session.matching_completed = True
     await db.commit()
+
+    await manager.broadcast(
+        "session.status.changed",
+        session.project_id,
+        session.session_id,
+        {
+            "session_id": session.session_id,
+            "project_id": session.project_id,
+            "in_progress": session.in_progress,
+            "matching_completed": session.matching_completed,
+        },
+    )
 
     return {
         "session_id": session.session_id,

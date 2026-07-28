@@ -31,6 +31,7 @@ from sqlalchemy import delete, select
 from app.core.database import get_db
 from app.core.config import settings
 from app.core.face_analyzer import cap_exemplars, request_face_analysis
+from app.core.realtime import manager
 from app.core.s3 import (
     abort_multipart_upload,
     complete_multipart_upload,
@@ -322,6 +323,20 @@ async def complete_video_upload(
 
     await db.flush()
     await db.commit()
+
+    if sess:
+        # 영상 업로드 완료 → 세션 자동 종료 (in_progress=False)
+        await manager.broadcast(
+            "session.status.changed",
+            sess.project_id,
+            sess.session_id,
+            {
+                "session_id": sess.session_id,
+                "project_id": sess.project_id,
+                "in_progress": sess.in_progress,
+                "matching_completed": sess.matching_completed,
+            },
+        )
 
     background_tasks.add_task(
         request_face_analysis,
@@ -635,6 +650,19 @@ async def update_analysis_result(
 
     await db.flush()
     await db.commit()
+
+    # analyzer가 새로 등록한 배우들을 실시간 반영 (매칭 화면용)
+    for new_actor_id in temp_to_actor_id.values():
+        await manager.broadcast(
+            "actor.created",
+            project_id,
+            None,
+            {
+                "actor_id": new_actor_id,
+                "project_id": project_id,
+                "name": f"배우 {new_actor_id}",
+            },
+        )
 
     return {
         "video_id": video.video_id,
