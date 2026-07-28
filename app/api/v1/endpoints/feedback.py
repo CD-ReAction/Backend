@@ -91,6 +91,10 @@ def _feedback_event_payload(
         "video_offset_seconds": feedback.video_offset_seconds,
         "actor_ids": actor_ids,
         "actor_names": actor_names,
+        # 대본 앵커 (v2 플로우, v1 작성분은 null)
+        "script_page": feedback.script_page,
+        "script_x": feedback.script_x,
+        "script_y": feedback.script_y,
         "created_at": f"{feedback.created_at.isoformat()}Z",
     }
 

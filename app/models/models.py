@@ -139,6 +139,10 @@ class Feedback(Base):
     created_by_user_id = Column(Integer, ForeignKey("users.user_id"), nullable=False, index=True)
     content = Column(Text, nullable=False)
     video_offset_seconds = Column(Float, nullable=True)
+    # 대본 앵커 (대본 없는 v1 플로우에서는 전부 null)
+    script_page = Column(Integer, nullable=True)   # 클릭한 PDF 페이지 (1-base)
+    script_x = Column(Float, nullable=True)        # 페이지 내 정규화 좌표 (0~1)
+    script_y = Column(Float, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
     session = relationship("Session", back_populates="feedbacks")
@@ -209,6 +213,26 @@ class CameraSession(Base): #camera-connection
     connected_at = Column(DateTime, nullable=True)
     recording_started_at = Column(DateTime, nullable=True)
     video_url = Column(String, nullable=True)
+
+class Script(Base):
+    """프로젝트 대본 PDF (프로젝트당 1개, 업로드 후 수정 불가 — MVP)"""
+    __tablename__ = "scripts"
+
+    script_id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(
+        Integer,
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,  # 프로젝트당 1개 강제
+        index=True,
+    )
+    s3_key = Column(String, nullable=False)
+    filename = Column(String, nullable=True)
+    # FE가 PDF 렌더링하며 파악한 페이지 수 (업로드 시 같이 보내면 저장)
+    page_count = Column(Integer, nullable=True)
+    uploaded_by_user_id = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
 
 class ProjectLike(Base):
     __tablename__ = "project_likes"

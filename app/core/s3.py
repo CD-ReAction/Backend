@@ -89,6 +89,21 @@ async def abort_multipart_upload(key: str, upload_id: str) -> None:
         raise Exception(f"S3 multipart 취소 실패: {e}")
 
 
+async def upload_object(key: str, body: bytes, content_type: str) -> str:
+    """작은 파일(대본 PDF 등) 서버 경유 업로드. 업로드된 객체 URL 반환."""
+    try:
+        await _to_thread(
+            s3_client.put_object,
+            Bucket=settings.S3_BUCKET_NAME,
+            Key=key,
+            Body=body,
+            ContentType=content_type,
+        )
+        return s3_object_url(key)
+    except ClientError as e:
+        raise Exception(f"S3 업로드 실패: {e}")
+
+
 def generate_presigned_url(key: str, expires_in: int = 3600) -> str:
     """S3 presigned URL 생성 (영상 재생용)"""
     return s3_client.generate_presigned_url(
