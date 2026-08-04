@@ -30,7 +30,11 @@ from sqlalchemy import delete, select
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.core.face_analyzer import cap_exemplars, request_face_analysis
+from app.core.face_analyzer import (
+    cap_exemplars,
+    request_analyzer_warmup,
+    request_face_analysis,
+)
 from app.core.realtime import manager
 from app.core.s3 import (
     abort_multipart_upload,
@@ -140,7 +144,11 @@ class AnalysisCallbackPayload(BaseModel):
 
 class InitUploadRequest(BaseModel):
     content_type: str = Field(..., description="video/webm | video/mp4 | video/quicktime")
-    file_size: int = Field(..., gt=0, description="전체 파일 크기(bytes)")
+    file_size: int | None = Field(
+        default=None,
+        gt=0,
+        description="전체 파일 크기(bytes). 녹화 중 스트리밍 업로드면 미정이라 생략",
+    )
     width: int | None = Field(default=None, gt=0, description="영상 가로 픽셀")
     height: int | None = Field(default=None, gt=0, description="영상 세로 픽셀")
 
@@ -157,7 +165,8 @@ class InitUploadResponse(BaseModel):
     s3_key: str
     video_id: int
     part_size: int
-    part_count: int
+    # 스트리밍 모드(file_size 미지정)면 None — 최종 파트 수는 complete 때 확정
+    part_count: int | None
 
 
 class PartUrlsRequest(BaseModel):
@@ -180,6 +189,9 @@ class CompleteUploadRequest(BaseModel):
     upload_id: str
     s3_key: str
     parts: list[CompletedPart] = Field(..., min_length=1)
+    # 스트리밍 모드는 init 시점에 인코딩된 픽셀 크기를 모름 → complete 때 보정
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
 
 
 class AbortUploadRequest(BaseModel):
@@ -191,23 +203,29 @@ class AbortUploadRequest(BaseModel):
 async def init_video_upload(
     session_id: int,
     payload: InitUploadRequest,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    """multipart 업로드 시작. Video row 생성/초기화."""
-    max_bytes = settings.MAX_VIDEO_SIZE_MB * 1024 * 1024
-    if payload.file_size > max_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"영상이 {settings.MAX_VIDEO_SIZE_MB}MB를 초과해요",
-        )
+    """multipart 업로드 시작. Video row 생성/초기화.
 
+    file_size가 없으면 스트리밍 모드 — 녹화 중 파트를 올리는 경우라
+    최종 크기를 알 수 없음. 파트 수 상한은 part-urls에서 검증됨.
+    """
     part_size = settings.UPLOAD_PART_SIZE_MB * 1024 * 1024
-    part_count = math.ceil(payload.file_size / part_size)
-    if part_count > settings.UPLOAD_MAX_PARTS:
-        raise HTTPException(
-            status_code=413,
-            detail=f"파트 수가 {settings.UPLOAD_MAX_PARTS}개를 초과해요",
-        )
+    part_count: int | None = None
+    if payload.file_size is not None:
+        max_bytes = settings.MAX_VIDEO_SIZE_MB * 1024 * 1024
+        if payload.file_size > max_bytes:
+            raise HTTPException(
+                status_code=413,
+                detail=f"영상이 {settings.MAX_VIDEO_SIZE_MB}MB를 초과해요",
+            )
+        part_count = math.ceil(payload.file_size / part_size)
+        if part_count > settings.UPLOAD_MAX_PARTS:
+            raise HTTPException(
+                status_code=413,
+                detail=f"파트 수가 {settings.UPLOAD_MAX_PARTS}개를 초과해요",
+            )
 
     # 프로젝트 단위 폴더로 묶기: {project_id}/{session_id}/video.{ext}
     sess_row = await db.execute(select(Session).where(Session.session_id == session_id))
@@ -248,6 +266,10 @@ async def init_video_upload(
 
     await db.flush()
     await db.commit()
+
+    # 녹화/업로드가 진행되는 동안 analyzer 워커를 미리 띄워서
+    # complete 시점의 콜드스타트(워커 부팅 + 모델 로드)를 상쇄
+    background_tasks.add_task(request_analyzer_warmup)
 
     return InitUploadResponse(
         upload_id=upload_id,
@@ -310,6 +332,8 @@ async def complete_video_upload(
     video.record_ended_at = datetime.utcnow()
     video.analysis_status = "pending"
     video.analysis_result = None
+    if payload.width is not None and payload.height is not None:
+        video.is_landscape = payload.width > payload.height
 
     sess_result = await db.execute(select(Session).where(Session.session_id == session_id))
     sess = sess_result.scalar_one_or_none()

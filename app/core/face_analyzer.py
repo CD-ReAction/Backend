@@ -24,6 +24,35 @@ def _callback_url() -> str | None:
     return f"{settings.PUBLIC_API_BASE_URL.rstrip('/')}/api/v1/videos/analysis-callback"
 
 
+async def request_analyzer_warmup() -> bool:
+    """RunPod serverless 워커 프리워밍.
+
+    upload/init(= 녹화/업로드 시작) 시점에 호출해서 콜드스타트(워커 부팅 +
+    모델 로드)를 업로드 시간과 겹치게 한다. analyzer handler는
+    {"warmup": true} 입력을 받으면 모델 로드만 하고 즉시 성공 반환해야 함.
+    """
+    if not settings.RUNPOD_ENDPOINT_URL or not settings.RUNPOD_API_KEY:
+        return False
+
+    payload = {"input": {"warmup": True}}
+    headers = {
+        "Authorization": f"Bearer {settings.RUNPOD_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(
+                settings.RUNPOD_ENDPOINT_URL, json=payload, headers=headers
+            )
+            response.raise_for_status()
+    except httpx.HTTPError:
+        # 워밍 실패는 기능에 영향 없음 (콜드스타트만 감수)
+        logger.warning("Analyzer warmup request failed", exc_info=True)
+        return False
+
+    return True
+
+
 async def request_face_analysis(
     *,
     video_id: int,
