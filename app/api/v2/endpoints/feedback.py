@@ -21,8 +21,10 @@ from app.models.models import Actor, Feedback, FeedbackActor, Session
 from app.api.v1.endpoints.feedback import (
     _actor_names,
     _feedback_event_payload,
+    _insert_feedback_stmt,
     _load_actor_ids,
     _project_id_of_session,
+    _validate_actors_with_names,
 )
 
 router = APIRouter(prefix="/sessions/{session_id}/feedbacks", tags=["feedback-v2"])
@@ -104,8 +106,31 @@ async def create_feedback_v2(
     대본 클릭 한 번 = (영상 시점, 대본 위치) 매핑:
     프론트가 클릭 순간의 녹화 경과 시간을 video_offset_seconds로,
     클릭한 페이지/좌표를 script_page/x/y로 채워서 보냄.
+
+    원격 DB 왕복 4번으로 처리: BEGIN → 배우 검증+이름 SELECT → INSERT CTE → COMMIT.
     """
+    actor_ids = list(dict.fromkeys(body.actor_ids))
+    actor_names = await _validate_actors_with_names(db, actor_ids)
+
+    row = (
+        await db.execute(
+            _insert_feedback_stmt(
+                session_id,
+                actor_ids,
+                created_by_user_id=user_id,
+                content=body.content,
+                video_offset_seconds=body.video_offset_seconds,
+                script_page=body.script_page,
+                script_x=body.script_x,
+                script_y=body.script_y,
+            )
+        )
+    ).one()
+    await db.commit()
+
+    # broadcast payload용 비영속 인스턴스 (DB 재조회 없이 응답값으로 구성)
     feedback = Feedback(
+        feedback_id=row.feedback_id,
         session_id=session_id,
         created_by_user_id=user_id,
         content=body.content,
@@ -113,23 +138,11 @@ async def create_feedback_v2(
         script_page=body.script_page,
         script_x=body.script_x,
         script_y=body.script_y,
+        created_at=row.created_at,
     )
-    db.add(feedback)
-    await db.flush()
-
-    actor_ids = list(dict.fromkeys(body.actor_ids))
-    await _validate_actor_ids(db, actor_ids)
-    for aid in actor_ids:
-        db.add(FeedbackActor(feedback_id=feedback.feedback_id, actor_id=aid))
-    await db.flush()
-
-    # commit 후 broadcast (payload는 commit된 DB 상태)
-    project_id = await _project_id_of_session(db, session_id)
-    actor_names = await _actor_names(db, actor_ids)
-    await db.commit()
     await manager.broadcast(
         "feedback.created",
-        project_id,
+        row.project_id,
         session_id,
         _feedback_event_payload(feedback, actor_ids, actor_names),
     )

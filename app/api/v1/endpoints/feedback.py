@@ -4,12 +4,14 @@ feedback.py
 피드백 작성, 조회, 수정, 삭제
 """
 
+from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import Integer, func, insert, literal, select
+from sqlalchemy.dialects.postgresql import ARRAY
 
 from app.core.database import get_db
 from app.core.realtime import manager
@@ -80,6 +82,67 @@ async def _actor_names(db: AsyncSession, actor_ids: List[int]) -> List[str]:
     return [names.get(aid) or f"배우 {aid}" for aid in actor_ids]
 
 
+async def _validate_actors_with_names(
+    db: AsyncSession, actor_ids: List[int]
+) -> List[str]:
+    """actor_ids 존재 검증 + 이름 조회를 SELECT 1번으로.
+
+    Supabase가 원격 리전이라 왕복당 수십 ms — 검증용/이름용 쿼리를
+    따로 날리면 그만큼 응답이 느려져서 합쳤다. 없는 배우가 있으면 400.
+    name이 null이면 '배우 {id}' fallback (기존 _actor_names와 동일 규칙).
+    """
+    if not actor_ids:
+        return []
+    res = await db.execute(
+        select(Actor.actor_id, Actor.name).where(Actor.actor_id.in_(actor_ids))
+    )
+    names = {aid: name for aid, name in res.all()}
+    missing = [aid for aid in actor_ids if aid not in names]
+    if missing:
+        raise HTTPException(status_code=400, detail=f"존재하지 않는 배우: {missing}")
+    return [names[aid] or f"배우 {aid}" for aid in actor_ids]
+
+
+def _insert_feedback_stmt(session_id: int, actor_ids: List[int], **values):
+    """피드백 INSERT + 배우 링크 INSERT + broadcast용 project_id 조회를
+    CTE 한 문장으로 묶은 statement 반환.
+
+    원격 DB에선 문장 수가 곧 지연이라(왕복당 수십 ms) 세 작업을 합쳤다:
+      WITH new_feedback AS (INSERT ... RETURNING feedback_id, created_at),
+           new_links   AS (INSERT INTO feedback_actors SELECT ... unnest(...))
+      SELECT feedback_id, created_at, (SELECT project_id FROM sessions ...) ...
+    """
+    fb = (
+        insert(Feedback)
+        # created_at을 명시하는 이유: 파이썬 default 컬럼은 중첩 INSERT(CTE 내부)
+        # 컴파일 시 prefetch 바인드를 못 만들어 CompileError가 남
+        .values(session_id=session_id, created_at=datetime.utcnow(), **values)
+        .returning(Feedback.feedback_id, Feedback.created_at)
+        .cte("new_feedback")
+    )
+    project_id_sq = (
+        select(Session.project_id)
+        .where(Session.session_id == session_id)
+        .scalar_subquery()
+    )
+    stmt = select(
+        fb.c.feedback_id,
+        fb.c.created_at,
+        project_id_sq.label("project_id"),
+    )
+    if actor_ids:
+        links = (
+            insert(FeedbackActor)
+            .from_select(
+                ["feedback_id", "actor_id"],
+                select(fb.c.feedback_id, func.unnest(literal(actor_ids, ARRAY(Integer)))),
+            )
+            .cte("new_links")
+        )
+        stmt = stmt.add_cte(links)
+    return stmt
+
+
 def _feedback_event_payload(
     feedback: Feedback, actor_ids: List[int], actor_names: List[str]
 ) -> dict:
@@ -108,51 +171,50 @@ async def create_feedback(
     user_id: int = Query(..., description="작성자 user_id"),
     db: AsyncSession = Depends(get_db),
 ):
-    """피드백 작성 (영상 촬영 중 실시간 작성 가능). actor_ids로 대상 배우 여러 명 지정 가능"""
+    """피드백 작성 (영상 촬영 중 실시간 작성 가능). actor_ids로 대상 배우 여러 명 지정 가능.
+
+    원격 DB 왕복 4번으로 처리: BEGIN → 배우 검증+이름 SELECT → INSERT CTE → COMMIT.
+    """
+    actor_ids = list(dict.fromkeys(body.actor_ids))  # 중복 제거, 순서 유지
+    actor_names = await _validate_actors_with_names(db, actor_ids)
+
+    row = (
+        await db.execute(
+            _insert_feedback_stmt(
+                session_id,
+                actor_ids,
+                created_by_user_id=user_id,
+                content=body.content,
+                video_offset_seconds=body.video_offset_seconds,
+            )
+        )
+    ).one()
+    await db.commit()
+
+    # broadcast payload용 비영속 인스턴스 (DB 재조회 없이 응답값으로 구성)
     feedback = Feedback(
+        feedback_id=row.feedback_id,
         session_id=session_id,
         created_by_user_id=user_id,
         content=body.content,
         video_offset_seconds=body.video_offset_seconds,
+        created_at=row.created_at,
     )
-    db.add(feedback)
-    await db.flush()
-
-    actor_ids = list(dict.fromkeys(body.actor_ids))  # 중복 제거, 순서 유지
-    if actor_ids:
-        res = await db.execute(
-            select(Actor.actor_id).where(Actor.actor_id.in_(actor_ids))
-        )
-        existing = {r[0] for r in res.all()}
-        missing = [aid for aid in actor_ids if aid not in existing]
-        if missing:
-            raise HTTPException(
-                status_code=400,
-                detail=f"존재하지 않는 배우: {missing}",
-            )
-        for aid in actor_ids:
-            db.add(FeedbackActor(feedback_id=feedback.feedback_id, actor_id=aid))
-        await db.flush()
-
-    # commit 후 broadcast (payload는 commit된 DB 상태)
-    project_id = await _project_id_of_session(db, session_id)
-    actor_names = await _actor_names(db, actor_ids)
-    await db.commit()
     await manager.broadcast(
         "feedback.created",
-        project_id,
+        row.project_id,
         session_id,
         _feedback_event_payload(feedback, actor_ids, actor_names),
     )
 
     return FeedbackOut(
-        feedback_id=feedback.feedback_id,
-        session_id=feedback.session_id,
-        created_by_user_id=feedback.created_by_user_id,
-        content=feedback.content,
-        video_offset_seconds=feedback.video_offset_seconds,
+        feedback_id=row.feedback_id,
+        session_id=session_id,
+        created_by_user_id=user_id,
+        content=body.content,
+        video_offset_seconds=body.video_offset_seconds,
         actor_ids=actor_ids,
-        created_at=feedback.created_at.isoformat(),
+        created_at=row.created_at.isoformat(),
     )
 
 
