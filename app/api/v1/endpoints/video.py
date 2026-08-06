@@ -569,6 +569,20 @@ async def update_analysis_result(
             video.analysis_result = json.dumps(
                 {"error_message": payload.error_message}, ensure_ascii=False
             )
+        await db.flush()
+        await db.commit()
+        # 매칭 화면이 폴링 대신 이 이벤트로 실패를 감지
+        await manager.broadcast(
+            "video.analysis.status.changed",
+            project_id,
+            video.session_id,
+            {
+                "video_id": video.video_id,
+                "session_id": video.session_id,
+                "analysis_status": video.analysis_status,
+                "error_message": payload.error_message,
+            },
+        )
         return {"video_id": video.video_id, "analysis_status": video.analysis_status}
 
     if project_id is None:
@@ -663,6 +677,19 @@ async def update_analysis_result(
                 "name": f"배우 {new_actor_id}",
             },
         )
+
+    # 매칭 화면이 폴링 대신 이 이벤트로 완료를 감지 (actor.created 이후에 보내
+    # 프론트가 이 시점에 /matching을 다시 조회하면 배우 목록까지 반영돼 있음)
+    await manager.broadcast(
+        "video.analysis.status.changed",
+        project_id,
+        video.session_id,
+        {
+            "video_id": video.video_id,
+            "session_id": video.session_id,
+            "analysis_status": "done",
+        },
+    )
 
     return {
         "video_id": video.video_id,

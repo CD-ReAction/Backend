@@ -5,7 +5,7 @@ from app.core.config import settings
 
 engine = create_async_engine(
     settings.DATABASE_URL,
-    echo=True,
+    echo=False,  # SQL 전문 로깅 — 디버깅 때만 켜기 (프로덕션 로그 소음/오버헤드)
     connect_args={"statement_cache_size": 0},  # Supabase PgBouncer 호환
 )
 
