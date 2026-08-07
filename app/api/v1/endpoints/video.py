@@ -30,11 +30,7 @@ from sqlalchemy import delete, select
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.core.face_analyzer import (
-    cap_exemplars,
-    request_analyzer_warmup,
-    request_face_analysis,
-)
+from app.core.face_analyzer import cap_exemplars, request_face_analysis
 from app.core.realtime import manager
 from app.core.s3 import (
     abort_multipart_upload,
@@ -203,7 +199,6 @@ class AbortUploadRequest(BaseModel):
 async def init_video_upload(
     session_id: int,
     payload: InitUploadRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     """multipart 업로드 시작. Video row 생성/초기화.
@@ -266,10 +261,6 @@ async def init_video_upload(
 
     await db.flush()
     await db.commit()
-
-    # 녹화/업로드가 진행되는 동안 analyzer 워커를 미리 띄워서
-    # complete 시점의 콜드스타트(워커 부팅 + 모델 로드)를 상쇄
-    background_tasks.add_task(request_analyzer_warmup)
 
     return InitUploadResponse(
         upload_id=upload_id,
