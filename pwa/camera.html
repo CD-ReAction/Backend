@@ -163,6 +163,7 @@
   const UPLOAD_PART_SIZE = 16 * 1024 * 1024;
   // 동시 업로드 파트 수 (모바일에서 안정적인 상한)
   const UPLOAD_CONCURRENCY = 6;
+  const VIDEO_API_BASE = `${CONFIG.API_BASE_URL}/api/v1/sessions/${DB_SESSION_ID}/video`;
 
   let mediaRecorder = null;
   let stream = null;
@@ -462,13 +463,28 @@
 
   async function startRecord() {
     if (!stream) return;
-    // 새 녹화 시작 전 이전 청크 + 이전 업로드 진행 상태 정리
+    // 새 녹화 시작 전 이전 청크 + 이전 업로드 진행 상태 정리.
+    // abort와 새 init이 같은 s3_key를 다뤄서, abort 완료를 기다린 뒤
+    // init하도록 promise를 스트리밍 세션에 넘김 (녹화 시작은 안 막음)
+    let staleAbort = Promise.resolve();
+    try {
+      const stale = await idbGetUploadState(DB_SESSION_ID);
+      if (stale?.uploadId && stale?.s3Key) {
+        staleAbort = fetch(`${VIDEO_API_BASE}/upload/abort`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ upload_id: stale.uploadId, s3_key: stale.s3Key }),
+        }).catch(() => {});
+      }
+    } catch {}
     try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
     try { await idbClearUploadState(DB_SESSION_ID); } catch {}
     videoBlob = null;
     document.getElementById("uploadBtn").style.display = "none";
 
     currentMimeType = pickMimeType();
+    // 녹화와 동시에 스트리밍 업로드 세션 시작 (init 응답은 버퍼링 중에 대기)
+    streamUpload = createStreamUpload(baseMime(currentMimeType), staleAbort);
     const options = {
       videoBitsPerSecond: TARGET_VIDEO_BPS,
       audioBitsPerSecond: TARGET_AUDIO_BPS,
@@ -488,6 +504,7 @@
     pendingChunkWrites = 0;
     mediaRecorder.ondataavailable = async (e) => {
       if (e.data.size === 0) return;
+      if (streamUpload) streamPushChunk(streamUpload, e.data);
       pendingChunkWrites++;
       try {
         await idbAddChunk(String(DB_SESSION_ID), currentMimeType || e.data.type, e.data);
@@ -507,6 +524,27 @@
       const stored = await idbGetChunks(String(DB_SESSION_ID));
       const type = baseMime(stored[0]?.mimeType || currentMimeType);
       videoBlob = new Blob(stored.map(c => c.blob), { type });
+
+      // 스트리밍 업로드가 정상이고 IDB 복원 blob과 바이트 수가 일치하면
+      // 남은 파트 + complete까지 자동으로 마무리
+      if (streamUpload) {
+        const st = streamUpload;
+        streamUpload = null;
+        if (!st.failed && st.totalBytes === videoBlob.size) {
+          await finishStreamUpload(st, videoBlob);
+          return;
+        }
+        // 일부 파트만 올라가고 실패한 경우: 파트 경계(partSize 슬라이스)가
+        // 재개 경로와 동일하므로, 올라간 파트를 재활용하게 최종 메타 저장
+        if (st.uploadId && st.totalBytes === videoBlob.size) {
+          await idbSaveUploadInit(DB_SESSION_ID, {
+            uploadId: st.uploadId, s3Key: st.s3Key, partSize: st.partSize,
+            partCount: Math.ceil(videoBlob.size / st.partSize),
+            contentType: baseMime(currentMimeType),
+            fileSize: videoBlob.size, etags: st.etags,
+          }).catch(() => {});
+        }
+      }
       document.getElementById("uploadBtn").style.display = "block";
       setStatus("ready", "촬영 완료! 업로드 버튼을 눌러주세요");
     };
@@ -529,6 +567,177 @@
 
     fetch(`${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/stop`, 
       { method: "POST" });
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  // 스트리밍 업로드: 녹화 중에 partSize 단위로 잘라 미리 S3에 PUT
+  // → 녹화 종료 시점엔 남은 자투리 파트 + complete만 남음.
+  // 파트 경계가 partSize 고정 슬라이스라, 실패 시 IDB에 남은 진행 상태로
+  // 기존 uploadVideo() 재개 경로와 그대로 호환됨.
+  // (iOS 14.x처럼 timeslice가 무시되는 기기는 stop 시점에 한 번에 flush —
+  //  자연스럽게 "종료 후 업로드"로 동작)
+  // ──────────────────────────────────────────────────────────────────
+  let streamUpload = null;
+
+  function createStreamUpload(contentType, waitFor = Promise.resolve()) {
+    const st = {
+      uploadId: null,
+      s3Key: null,
+      partSize: UPLOAD_PART_SIZE,
+      buffer: [],        // 아직 파트로 안 자른 청크 blob들
+      bufferSize: 0,
+      nextPart: 1,
+      totalBytes: 0,
+      uploadedBytes: 0,
+      etags: [],
+      inFlight: 0,
+      failed: false,
+      ready: null,
+    };
+    st.ready = (async () => {
+      await waitFor; // 이전 업로드 abort가 먼저 처리되도록 (같은 s3_key 클리어 방지)
+      // file_size 없이 init = 스트리밍 모드 (백엔드가 part_count 검증 스킵)
+      const res = await fetch(`${VIDEO_API_BASE}/upload/init`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ content_type: contentType }),
+      });
+      if (!res.ok) throw new Error(`init 실패 (${res.status})`);
+      const d = await res.json();
+      st.uploadId = d.upload_id;
+      st.s3Key = d.s3_key;
+      st.partSize = d.part_size;
+      await idbSaveUploadInit(DB_SESSION_ID, {
+        uploadId: st.uploadId, s3Key: st.s3Key, partSize: st.partSize,
+        partCount: null, contentType, fileSize: null, etags: [],
+      }).catch(() => {});
+    })().catch((e) => {
+      console.warn("스트리밍 init 실패 — 종료 후 업로드로 폴백", e);
+      st.failed = true;
+    });
+    return st;
+  }
+
+  function streamPushChunk(st, blob) {
+    st.buffer.push(blob);
+    st.bufferSize += blob.size;
+    st.totalBytes += blob.size;
+    streamFlushParts(st, false);
+  }
+
+  // 버퍼를 partSize 단위로 잘라 업로드 큐잉. isFinal이면 자투리도 마지막 파트로.
+  async function streamFlushParts(st, isFinal) {
+    try { await st.ready; } catch { return; }
+    if (st.failed) return;
+    while (st.bufferSize >= st.partSize || (isFinal && st.bufferSize > 0)) {
+      const joined = new Blob(st.buffer);
+      const take = Math.min(st.partSize, st.bufferSize);
+      const partBlob = joined.slice(0, take);
+      const rest = joined.slice(take);
+      st.buffer = rest.size > 0 ? [rest] : [];
+      st.bufferSize = rest.size;
+      const n = st.nextPart++;
+      st.inFlight++;
+      uploadStreamPart(st, n, partBlob).finally(() => { st.inFlight--; });
+    }
+  }
+
+  async function uploadStreamPart(st, n, blob) {
+    try {
+      const urlsRes = await fetch(`${VIDEO_API_BASE}/upload/part-urls`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ upload_id: st.uploadId, s3_key: st.s3Key, part_numbers: [n] }),
+      });
+      if (!urlsRes.ok) throw new Error(`part-urls 실패 (${urlsRes.status})`);
+      const { urls } = await urlsRes.json();
+      const etag = await putWithRetry(urls[n], blob);
+      st.etags.push({ part_number: n, etag });
+      st.uploadedBytes += blob.size;
+      await idbAddUploadEtag(DB_SESSION_ID, n, etag).catch(() => {});
+      if (recording) {
+        setMsg(`백그라운드 업로드 ${(st.uploadedBytes / (1024 * 1024)).toFixed(0)}MB`);
+      }
+    } catch (e) {
+      console.warn(`스트리밍 파트 ${n} 업로드 실패`, e);
+      st.failed = true; // 종료 후 기존 재개 경로로 폴백
+    }
+  }
+
+  // 녹화 종료 후: 남은 버퍼 flush → 전 파트 완료 대기 → complete
+  async function finishStreamUpload(st, blob) {
+    const btn = document.getElementById("uploadBtn");
+    btn.style.display = "none";
+    setStatus("ready", "업로드 마무리 중...");
+    setMsg("");
+    try {
+      await streamFlushParts(st, true);
+      const partCount = st.nextPart - 1;
+      if (partCount > 0) setProgress((st.etags.length / partCount) * 100);
+      while (st.inFlight > 0) {
+        if (partCount > 0) setProgress((st.etags.length / partCount) * 100);
+        await new Promise(r => setTimeout(r, 200));
+      }
+      if (st.failed || partCount === 0 || st.etags.length !== partCount) {
+        throw new Error("스트리밍 파트 업로드 불완전");
+      }
+
+      // complete 실패 시에도 재개 가능하게 최종 메타 저장 (재개 경로 호환)
+      await idbSaveUploadInit(DB_SESSION_ID, {
+        uploadId: st.uploadId, s3Key: st.s3Key, partSize: st.partSize,
+        partCount, contentType: baseMime(currentMimeType),
+        fileSize: blob.size, etags: st.etags,
+      }).catch(() => {});
+
+      setProgress(100);
+      const { width, height } = await getVideoDimensions(blob);
+      const parts = [...st.etags].sort((a, b) => a.part_number - b.part_number);
+      const body = { upload_id: st.uploadId, s3_key: st.s3Key, parts };
+      if (width > 0 && height > 0) {
+        body.width = width;
+        body.height = height;
+      }
+      const completeRes = await fetch(`${VIDEO_API_BASE}/upload/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!completeRes.ok) throw new Error(`complete 실패 (${completeRes.status})`);
+      const data = await completeRes.json();
+
+      try {
+        await fetch(
+          `${CONFIG.API_BASE_URL}/api/v1/camera-session/${SESSION_ID}/done?video_url=${encodeURIComponent(data.s3_url || "")}`,
+          { method: "POST" }
+        );
+      } catch {}
+      try { await idbClearChunks(String(DB_SESSION_ID)); } catch {}
+      try { await idbClearUploadState(DB_SESSION_ID); } catch {}
+
+      hideProgress();
+      btn.style.display = "block";
+      btn.disabled = true;
+      btn.className = "upload-btn success";
+      btn.textContent = "업로드 완료 ✅";
+      setStatus("done", "모든 작업이 완료됐어요!");
+    } catch (e) {
+      console.warn("스트리밍 업로드 마무리 실패 — 수동 업로드로 폴백", e);
+      // 올라간 파트를 재활용할 수 있게 진행 상태 저장 후 기존 버튼 경로로
+      if (st.uploadId) {
+        await idbSaveUploadInit(DB_SESSION_ID, {
+          uploadId: st.uploadId, s3Key: st.s3Key, partSize: st.partSize,
+          partCount: Math.ceil(blob.size / st.partSize),
+          contentType: baseMime(currentMimeType),
+          fileSize: blob.size, etags: st.etags,
+        }).catch(() => {});
+      }
+      hideProgress();
+      btn.style.display = "block";
+      btn.disabled = false;
+      btn.className = "upload-btn";
+      btn.textContent = "영상 업로드";
+      setStatus("ready", "촬영 완료! 업로드 버튼을 눌러주세요");
+    }
   }
 
   // ──────────────────────────────────────────────────────────────────
@@ -594,7 +803,7 @@
     setMsg("");
     setProgress(0);
 
-    const apiBase = `${CONFIG.API_BASE_URL}/api/v1/sessions/${DB_SESSION_ID}/video`;
+    const apiBase = VIDEO_API_BASE;
     const contentType = baseMime(currentMimeType || videoBlob.type);
     let uploadId, s3Key, partSize, partCount, resumed = false, completedEtags = [];
 
@@ -609,8 +818,18 @@
         completedEtags = saved.etags || [];
         resumed = true;
       } else {
-        // 기존 잔존 state가 있다면 정리 (다른 blob이라 못 씀)
-        if (saved) await idbClearUploadState(DB_SESSION_ID).catch(() => {});
+        // 기존 잔존 state가 있다면 정리 (다른 blob이라 못 씀) + S3 조각 abort.
+        // abort가 같은 s3_key의 Video row를 만지므로 init 전에 완료 보장
+        if (saved) {
+          if (saved.uploadId && saved.s3Key) {
+            await fetch(`${apiBase}/upload/abort`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ upload_id: saved.uploadId, s3_key: saved.s3Key }),
+            }).catch(() => {});
+          }
+          await idbClearUploadState(DB_SESSION_ID).catch(() => {});
+        }
 
         // 1) init
         const { width: videoWidth, height: videoHeight } = await getVideoDimensions(videoBlob);
