@@ -43,11 +43,22 @@ async def request_face_analysis(
     thumbnail_dir: analyzer가 썸네일을 S3에 PUT할 디렉터리 (끝에 슬래시 포함).
     예: "{project_id}/{session_id}/" → analyzer는 이 안에 "thumb-{idx}.jpg" 형식으로 저장.
     """
-    if not settings.RUNPOD_ENDPOINT_URL:
-        logger.info("RUNPOD_ENDPOINT_URL is not configured; skipping analysis request")
-        return False
-    if not settings.RUNPOD_API_KEY:
-        logger.warning("RUNPOD_API_KEY is not configured; skipping analysis request")
+    mode = (settings.ANALYZER_MODE or "runpod").strip().lower()
+    if mode == "direct":
+        url = settings.ANALYZER_DIRECT_URL
+        if not url:
+            logger.info("ANALYZER_DIRECT_URL is not configured; skipping analysis request")
+            return False
+    elif mode == "runpod":
+        url = settings.RUNPOD_ENDPOINT_URL
+        if not url:
+            logger.info("RUNPOD_ENDPOINT_URL is not configured; skipping analysis request")
+            return False
+        if not settings.RUNPOD_API_KEY:
+            logger.warning("RUNPOD_API_KEY is not configured; skipping analysis request")
+            return False
+    else:
+        logger.warning("Unknown ANALYZER_MODE=%r; skipping analysis request", settings.ANALYZER_MODE)
         return False
 
     callback_url = _callback_url()
@@ -55,28 +66,29 @@ async def request_face_analysis(
         logger.warning("PUBLIC_API_BASE_URL is not configured; skipping analysis request")
         return False
 
-    payload = {
-        "input": {
-            "video_id": video_id,
-            "session_id": session_id,
-            "s3_bucket": settings.S3_BUCKET_NAME,
-            "s3_key": s3_key,
-            "s3_url": s3_url,
-            "callback_url": callback_url,
-            "known_actors": known_actors or [],
-            "thumbnail_dir": thumbnail_dir,
-        }
+    inner = {
+        "video_id": video_id,
+        "session_id": session_id,
+        "s3_bucket": settings.S3_BUCKET_NAME,
+        "s3_key": s3_key,
+        "s3_url": s3_url,
+        "callback_url": callback_url,
+        "known_actors": known_actors or [],
+        "thumbnail_dir": thumbnail_dir,
     }
-    headers = {
-        "Authorization": f"Bearer {settings.RUNPOD_API_KEY}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
+    if mode == "runpod":
+        # RunPod Serverless: {"input": {...}} 래핑 + Bearer 인증
+        payload: dict[str, Any] = {"input": inner}
+        headers["Authorization"] = f"Bearer {settings.RUNPOD_API_KEY}"
+    else:
+        # 자체 analyzer 서버: payload 그대로. 응답은 202 {"video_id", "analysis_status": "accepted"},
+        # 실제 결과는 callback_url로 옴.
+        payload = inner
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                settings.RUNPOD_ENDPOINT_URL, json=payload, headers=headers
-            )
+            response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
     except httpx.HTTPError:
         logger.exception("Failed to request face analysis for video_id=%s", video_id)

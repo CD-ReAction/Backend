@@ -22,7 +22,11 @@ class Settings(BaseSettings):
     UPLOAD_MAX_PARTS: int = 1024           # 16MB × 1024 = 16GB까지
     UPLOAD_URL_EXPIRES_SECONDS: int = 3600 # 파트별 presigned URL 유효시간
 
-    # Face Analyzer service (RunPod Serverless)
+    # Face Analyzer service
+    # ANALYZER_MODE: "runpod" (RunPod Serverless, {"input": {...}} 래핑 + Bearer 인증)
+    #              | "direct" (자체 서버 POST {ANALYZER_DIRECT_URL}, payload 그대로)
+    ANALYZER_MODE: str = "runpod"
+    ANALYZER_DIRECT_URL: str | None = None  # 예: http://<서버주소>:8000/analyze
     RUNPOD_ENDPOINT_URL: str | None = None
     RUNPOD_API_KEY: str | None = None
     FACE_ANALYZER_SECRET: str | None = None
